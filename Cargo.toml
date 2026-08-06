@@ -1,0 +1,68 @@
+[package]
+name = "xdg-desktop-portal-wlrix"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "wlRIX desktop portal backend — screen sharing over ext-image-copy-capture and PipeWire."
+repository = "https://github.com/wlrix/xdg-desktop-portal-wlrix"
+publish = false
+
+[dependencies]
+# D-Bus. This program *is* a D-Bus service: it owns
+# `org.freedesktop.impl.portal.desktop.wlrix` and serves the ScreenCast interface that
+# xdg-desktop-portal proxies application requests to.
+#
+# The default `async-io` and `blocking-api` features are kept and `tokio` is deliberately not
+# enabled, matching `wlrix-idle`: the blocking API runs on a dedicated thread that reports into
+# calloop, so no async runtime ever touches the main loop. The Wayland connection and the
+# PipeWire loop are both fd-driven and belong on calloop with everything else.
+zbus = "5"
+# A one-shot reply channel from the main loop back to a D-Bus method that is still waiting.
+#
+# `Start` cannot answer immediately -- it has to show the picker and wait for the user -- and it
+# must not *block* while it waits either, because `Request.Close` is how an application cancels
+# a share it has already asked for, and a blocked handler would not be dispatched until the very
+# call it is meant to cancel had finished. So the portal methods are `async fn` that await on
+# this, which yields the executor to `Close` instead of holding it. This is zbus's own async
+# machinery (already in the tree via its default `async-io` feature), confined to the bus
+# thread; no async runtime touches the calloop side, which is the rule `wlrix-idle` set.
+async-channel = "2"
+# PipeWire, which is what a ScreenCast portal ultimately is: the capture has to come out
+# somewhere a browser or OBS can consume it, and that somewhere is a `pw_stream` node.
+#
+# These are the official bindings from the PipeWire project. They are the reason this program is
+# Rust: C# has no PipeWire bindings at all, and SPA's POD builders are `static inline` in the
+# headers with no exported symbols, so P/Invoke cannot reach them.
+pipewire = "0.10"
+# SPA, for the video format and buffer parameters negotiated with the stream. Comes in with
+# `pipewire` anyway; named explicitly because the POD builders are used directly.
+libspa = "0.10"
+# The Wayland client. The portal captures through `ext-image-capture-source-v1` +
+# `ext-image-copy-capture-v1` and enumerates windows through `ext-foreign-toplevel-list-v1`.
+#
+# Raw `wayland-client` rather than smithay-client-toolkit, which the other wlRIX clients use:
+# SCTK exists for the shell plumbing of a client that puts something on screen -- surfaces,
+# seats, layer shell -- and this one draws nothing. Everything it touches, SCTK does not wrap.
+wayland-client = "0.31"
+# The capture protocols are staging rather than stable, hence the feature. `ext-foreign-toplevel-list`
+# is here too. Same major versions the rest of the workspace pins.
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# The event loop. The Wayland fd, the PipeWire loop fd, the D-Bus thread's channel and the
+# preview timer are all sources on one loop, so nothing polls.
+calloop = "0.13"
+# The config file (preview tick rate, tile size). TOML is wlRIX's config format throughout.
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+# The picker protocol. The C#/Avalonia source picker is a separate process that reads a manifest
+# on stdin and writes the selection on stdout, both JSON -- the one place in wlRIX that is not
+# TOML, because this is a wire format between two processes rather than a file a human edits.
+serde_json = "1"
+# Signal handling (SIGTERM: stop casts and drop sessions before exiting) and the memfd/mmap
+# plumbing under the preview files.
+libc = "0.2"
+# `memfd_create` and `mmap` for the preview buffers, and `O_NOFOLLOW` on the runtime directory.
+# Already in the tree via calloop, so it costs nothing new -- the same reason wlrix-idle and
+# wlrix-desktop use it.
+rustix = { version = "1", features = ["fs", "mm"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.wlrix
+Exec=@LIBEXECDIR@/xdg-desktop-portal-wlrix
+SystemdService=xdg-desktop-portal-wlrix.service

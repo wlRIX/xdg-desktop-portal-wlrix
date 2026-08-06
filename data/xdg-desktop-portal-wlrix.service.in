@@ -1,0 +1,15 @@
+[Unit]
+Description=Portal service (wlRIX implementation)
+PartOf=graphical-session.target
+After=graphical-session.target
+# This backend is a Wayland client: with no display to connect to it can only fail, and failing
+# loudly at session start is worse than not being there. `wlrix-session` publishes
+# WAYLAND_DISPLAY to the *user manager's* environment (see its src/systemd.rs) precisely so this
+# condition can be met -- systemd checks it there, not against any session process.
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.impl.portal.desktop.wlrix
+ExecStart=@LIBEXECDIR@/xdg-desktop-portal-wlrix
+Restart=on-failure

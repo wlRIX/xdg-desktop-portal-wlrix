@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Unlike the other wlRIX Rust components, this one links C libraries: `pipewire-sys` and
+      # `libspa-sys` build against the system PipeWire through pkg-config, and there is no
+      # vendored fallback. clang is for their bindgen.
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpipewire-0.3-dev libspa-0.2-dev clang
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --verbose
+      # The tests touch neither a compositor, a bus nor PipeWire: anything that needs one of
+      # those is verified by hand against a running session, as the README describes.
+      - name: Test
+        run: cargo test --verbose
