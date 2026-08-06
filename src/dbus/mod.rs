@@ -122,9 +122,15 @@ fn oneshot<T>() -> (Reply<T>, async_channel::Receiver<(PortalResponse, T)>) {
 /// What the main loop keeps hold of: the connection, kept alive.
 ///
 /// Dropping it closes the bus connection and releases the name, so it is held for the life of
-/// the process even though nothing calls into it.
+/// the process.
 pub struct Bus {
-    _connection: zbus::blocking::Connection,
+    /// Also how the loop talks *back* to an application.
+    ///
+    /// Almost everything here is request/response and answers through a [`Reply`], but
+    /// `Session.Closed` is not a reply to anything -- it is the backend saying, unprompted,
+    /// that a share has ended. `emit_signal` is synchronous and the connection is `Clone` and
+    /// thread-safe, so the loop can send it without going near the bus thread.
+    pub connection: zbus::blocking::Connection,
 }
 
 /// Own the bus name and serve the ScreenCast interface.
@@ -150,7 +156,14 @@ pub fn spawn(replace: bool) -> Result<(Bus, calloop::channel::Channel<Request>),
     // `DoNotQueue`: queueing would leave this process running and reachable at its unique name
     // but not at the well-known one, so the frontend would keep using whoever holds it while
     // this sat waiting for a turn that may never come. Better to fail and let activation retry.
-    let mut flags = zbus::fdo::RequestNameFlags::DoNotQueue.into();
+    //
+    // `AllowReplacement` **always**, and it is not optional the way it looks. D-Bus replacement
+    // is granted by the *incumbent*, not taken by the newcomer: a name requested without this
+    // flag can never be replaced, so `--replace` on a later run fails with "name already taken"
+    // no matter what that run asks for. Setting it only when `--replace` was passed -- the
+    // obvious reading -- makes the flag protect the wrong process and never work.
+    let mut flags =
+        zbus::fdo::RequestNameFlags::DoNotQueue | zbus::fdo::RequestNameFlags::AllowReplacement;
     if replace {
         flags |= zbus::fdo::RequestNameFlags::ReplaceExisting;
     }
@@ -163,14 +176,10 @@ pub fn spawn(replace: bool) -> Result<(Bus, calloop::channel::Channel<Request>),
     ) {
         return Err(format!(
             "{BUS_NAME} is already owned by another portal backend ({reply:?}); \
-             pass --replace to take it"
+             pass --replace to take it. If --replace was passed and this still failed, the \
+             process holding the name predates AllowReplacement and has to be stopped by hand."
         ));
     }
 
-    Ok((
-        Bus {
-            _connection: connection,
-        },
-        channel,
-    ))
+    Ok((Bus { connection }, channel))
 }

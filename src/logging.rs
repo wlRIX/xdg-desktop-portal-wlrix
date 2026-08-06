@@ -18,6 +18,16 @@ pub fn init() {
         .with(filter)
         // No timestamps: the journal stamps every line already, and a second clock in the text
         // just makes the lines longer.
-        .with(fmt::layer().without_time().with_writer(std::io::stderr))
+        //
+        // No color either. stderr here is the journal or a redirected file, neither of which
+        // renders escape codes -- and they are not merely ugly. `tracing`'s colored output puts
+        // them *between* a field's name and its `=`, so `grep 'frames='` silently matches
+        // nothing on a log full of `frames=120`. That cost real time during development.
+        .with(
+            fmt::layer()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(std::io::stderr),
+        )
         .init();
 }

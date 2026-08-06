@@ -21,11 +21,23 @@
 //! uses for its inhibit interfaces and `wlrix-greeter` uses for greetd. The Wayland connection
 //! and the PipeWire loop are both fd-driven and join the same loop, so nothing polls.
 
+mod cast;
+mod config;
 mod dbus;
 mod logging;
+mod picker;
 mod portal;
+mod preview;
+mod probe;
+mod signals;
+mod wayland;
 
-use std::process::ExitCode;
+pub use portal::Portal;
+
+use std::{process::ExitCode, time::Duration};
+
+/// How often to retry the frame pump. See where it is inserted for why it must exist.
+const FRAME_TICK: Duration = Duration::from_millis(16);
 
 /// What the command line asked for.
 ///
@@ -36,6 +48,9 @@ struct Args {
     /// Take the bus name from whoever already holds it. For development, when a previous run
     /// is still around.
     replace: bool,
+    /// List what can be captured, capture one of each, and exit. A development tool -- see
+    /// [`probe`].
+    probe: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -43,6 +58,7 @@ fn parse_args() -> Result<Args, String> {
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--replace" => args.replace = true,
+            "--probe" => args.probe = true,
             "--version" | "-V" => {
                 println!("xdg-desktop-portal-wlrix {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -55,6 +71,7 @@ fn parse_args() -> Result<Args, String> {
                      Usage: xdg-desktop-portal-wlrix [options]\n\n\
                      Options:\n  \
                        --replace       take the bus name from whoever already holds it\n  \
+                       --probe         list what can be shared, capture one of each to\n                                   /tmp, and exit. Never claims the bus name.\n  \
                        -V, --version   version, then exit\n  \
                        -h, --help      this message\n\n\
                      Logging: RUST_LOG, output to the journal. Prefer scoping it to this\n\
@@ -93,15 +110,32 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &Args) -> Result<(), String> {
-    let mut event_loop = calloop::EventLoop::<portal::Portal>::try_new()
+    let mut event_loop = calloop::EventLoop::<'static, portal::Portal>::try_new()
         .map_err(|err| format!("could not create the event loop: {err}"))?;
     let handle = event_loop.handle();
+    let mut portal = portal::Portal::default();
 
-    // The bus thread reports in here. It is started before anything else so that a failure to
-    // own the name is fatal at once: a portal backend nobody can reach is not worth running,
-    // and exiting lets D-Bus activation try again later rather than leaving a silent process.
-    let (_bus, channel) = dbus::spawn(args.replace)?;
+    // The compositor first, and the bus name only if that worked. A backend that owned the name
+    // without being able to capture anything would have every share fail against it, where
+    // failing here leaves the name free for a backend that can.
+    portal.handle = Some(handle.clone());
+    portal.connection = Some(wayland::connect(&handle, &mut portal)?);
+    tracing::info!(
+        monitors = portal.wayland.inventory.ready_monitors().count(),
+        windows = portal.wayland.inventory.ready_windows().count(),
+        "connected to the compositor",
+    );
 
+    if args.probe {
+        return probe::run(&mut event_loop, &mut portal);
+    }
+
+    // After the compositor, before the bus, for the same reason: a backend that cannot publish a
+    // stream has nothing to offer an application, so it should not hold the name.
+    portal.pipewire = Some(cast::connect(&handle)?);
+
+    let (bus, channel) = dbus::spawn(args.replace)?;
+    portal.bus = Some(bus.connection.clone());
     handle
         .insert_source(channel, |event, _, portal| {
             if let calloop::channel::Event::Msg(request) = event {
@@ -110,10 +144,49 @@ fn run(args: &Args) -> Result<(), String> {
         })
         .map_err(|err| format!("could not watch the D-Bus channel: {err}"))?;
 
-    let mut portal = portal::Portal::default();
+    // A heartbeat, and it is load-bearing rather than a convenience.
+    //
+    // The frame pump is edge-driven: a finished capture wakes the loop, which queues the frame
+    // and asks for the next. But if at that moment no PipeWire buffer is free -- the consumer
+    // has not returned one yet -- no new capture is requested, and nothing else is going to wake
+    // this process. The stream would deliver exactly one frame and then stall forever. This tick
+    // is what retries.
+    //
+    // 16ms, so retrying costs at most a frame at 60Hz. When there is nothing to do the tick runs
+    // `after_dispatch` over empty lists and goes back to sleep.
+    handle
+        .insert_source(
+            calloop::timer::Timer::from_duration(FRAME_TICK),
+            |_, _, _| calloop::timer::TimeoutAction::ToDuration(FRAME_TICK),
+        )
+        .map_err(|err| format!("could not start the frame timer: {err}"))?;
+
+    // Stop cleanly when systemd stops the unit, so every `Drop` runs -- see `signals`.
+    let (quit, quit_source) = calloop::ping::make_ping()
+        .map_err(|err| format!("could not create the quit signal: {err}"))?;
+    let stopping = std::rc::Rc::new(std::cell::Cell::new(false));
+    let stop = std::rc::Rc::clone(&stopping);
+    handle
+        .insert_source(quit_source, move |_, _, _| {
+            tracing::info!("stopping");
+            stop.set(true);
+        })
+        .map_err(|err| format!("could not watch for signals: {err}"))?;
+    signals::forward_to_loop(quit);
 
     tracing::info!("serving {}", dbus::BUS_NAME);
+    let signal = event_loop.get_signal();
     event_loop
-        .run(None, &mut portal, |_| {})
+        // Finished captures are collected once per dispatch rather than from inside the protocol
+        // handlers, which cannot touch the buffers they belong to while the queue borrows the
+        // state. It is also the pattern the compositor itself uses for the other side of these
+        // protocols -- reconcile once per loop iteration rather than hooking every site.
+        .run(None, &mut portal, |portal| {
+            portal.after_dispatch();
+            if stopping.get() {
+                portal.shut_down();
+                signal.stop();
+            }
+        })
         .map_err(|err| format!("event loop failed: {err}"))
 }

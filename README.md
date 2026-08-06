@@ -90,6 +90,109 @@ the wrong path; if it resolves but applications still see no sources, suspect th
 `RUST_LOG=xdg_desktop_portal_wlrix=debug` for the details. Scope it to the crate — a bare
 `RUST_LOG=debug` turns on zbus's message tracing, which buries everything worth reading.
 
+## The picker protocol
+
+`wlrix-source-picker` is spawned from `PATH` for one question and exits with the answer. This is the whole contract
+between the two halves; the picker binds no Wayland protocols and links no PipeWire.
+
+**In** — a JSON manifest on stdin, closed straight after:
+
+```json
+{
+  "app_id": "org.mozilla.firefox",
+  "multiple": false,
+  "cursor": true,
+  "sources": [
+    {
+      "id": "DisplayPort-4",
+      "kind": "monitor",
+      "label": "DELL U2515H (DisplayPort-4)",
+      "app_id": "",
+      "width": 2560,
+      "height": 1440,
+      "preview": "/run/user/1000/wlrix-portal/session_a1/preview-DisplayPort-4.raw"
+    },
+    {
+      "id": "oGhQDAH09yq7",
+      "kind": "window",
+      "label": "Inbox — Thunderbird",
+      "app_id": "thunderbird",
+      "width": 0,
+      "height": 0,
+      "preview": "/run/user/1000/wlrix-portal/session_a1/preview-oGhQDAH09yq7.raw"
+    }
+  ]
+}
+```
+
+`width`/`height` are `0` for a window — the compositor only reports a window's capture size once a session is open on
+it, so size the tile from the preview instead. `preview` may be absent; show the tile without one rather than dropping
+the source.
+
+**Out** — on stdout, when the user accepts:
+
+```json
+{
+  "sources": [
+    "DisplayPort-4"
+  ]
+}
+```
+
+**Exit code** — `0` accepted, `1` cancelled, anything else failed. Both signals are checked: a picker that dies
+mid-answer produces neither valid stdout nor a zero exit. An empty `sources` with exit 0 counts as canceled. Ids not in
+the manifest are discarded, and more ids than `multiple` allows are truncated.
+
+stderr is the picker's log and joins this program's in the journal.
+
+### Preview files
+
+Each is a fixed-size file, rewritten in place, that the picker maps once and watches:
+
+| Offset |       |                                                                  |
+|--------|-------|------------------------------------------------------------------|
+| 0      | `u32` | magic, `0x58524C57` (`WLRX`)                                     |
+| 4      | `u32` | version, currently 1                                             |
+| 8, 12  | `u32` | width, height of the thumbnail                                   |
+| 16     | `u32` | stride in bytes                                                  |
+| 20     | `u32` | format; `0` = BGRA/BGRX 8888                                     |
+| 24     | `u32` | sequence                                                         |
+| 28     | `u32` | the source's own size, `width << 16 \| height`, for letterboxing |
+| 32     |       | pixels                                                           |
+
+**Check the magic and version before trusting the dimensions** — the directory name is predictable, and a reader that
+maps whatever it finds and believes the header can be made to read out of bounds.
+
+The sequence number is a seqlock: **odd means a write is in progress**. Read it, read the pixels, read it again; if it
+changed or was odd, the frame is torn — try again. It starts at 0, so a tile that has never been published reads even
+with no pixels.
+
+Sources take turns being captured (the protocol has no server-side downscale, so every capture arrives at full size), so
+with several sources each tile refreshes roughly once a second rather than at video rate. `tick_ms` and `tile` in
+`portal.toml` tune that.
+
+## Configuration
+
+`$XDG_CONFIG_HOME/wlrix/portal.toml`, else `/etc/wlrix/portal.toml`. There is no file by default and the defaults are
+what everything was tuned with. Unknown keys are an error, as elsewhere in wlRIX.
+
+```toml
+[preview]
+tick_ms = 100     # how often *one* source is captured; they take turns
+tile = [320, 180] # thumbnail size
+```
+
+## While a share is running
+
+- **A source that changes size is followed**, not dropped. Maximizing a shared window renegotiates the PipeWire format
+  in place, which keeps the node id — the application was told that id by `Start` and has no way to be told a new one,
+  so restarting the stream would simply stop it.
+- **A source that goes away ends the share.** The compositor stops the capture, the stream is disconnected, and
+  `Session.Closed` tells the application — the only way it learns that the picture it is showing will never move again.
+  A session sharing several sources ends only when the last one is gone.
+- **`Session.Close`, and stopping the service, tear everything down**: captures released, streams disconnected, any open
+  picker killed, preview files removed.
+
 ## What is implemented
 
 Interface version 4. Monitor and window sources; hidden and embedded cursor modes.
@@ -111,7 +214,11 @@ Not implemented, and deliberately not advertised:
 - **The picker is not parented to the window that asked for the share.** The portal's
   `parent_window` is a `wayland:` handle for `xdg-foreign`, and Avalonia's Wayland backend implements the *export* half
   of that protocol but not the import half. The handle is logged and otherwise ignored until that lands upstream.
-- **Capture is through shared memory, not dmabuf.** The compositor's
-  `ext-image-copy-capture` advertises no dmabuf constraints yet, so every frame is a GPU readback plus a shm write.
-  Noticeable at 1440p60. The fix belongs in
-  `wlrix-compositor/src/image_capture.rs`, not here.
+- **Capture is through shared memory, not dmabuf, and each frame is copied once.** The compositor's
+  `ext-image-copy-capture` advertises no dmabuf constraints yet, so every frame is a GPU readback plus a shm write, plus
+  one `memcpy` into PipeWire's buffer. Noticeable at 1440p60.
+
+  The copy is deliberate. Capturing straight into a PipeWire buffer — zero-copy, and it was built — deadlocks: the
+  compositor's repaint clock and PipeWire's graph cycle each wait on the other, and the stream delivers exactly one
+  frame. The capture therefore owns its own buffer and frames are copied across. Removing the copy means dmabuf, not
+  re-coupling the two clocks; that work belongs in `wlrix-compositor/src/image_capture.rs`.

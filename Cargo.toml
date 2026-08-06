@@ -64,5 +64,9 @@ libc = "0.2"
 # Already in the tree via calloop, so it costs nothing new -- the same reason wlrix-idle and
 # wlrix-desktop use it.
 rustix = { version = "1", features = ["fs", "mm"] }
+# Puts the Wayland connection's fd on calloop, so the compositor's events wake the same loop as
+# everything else. 0.3 rather than the newer 0.4, which wants calloop 0.14: 0.13 is what the rest
+# of wlRIX pins, and one calloop across the workspace is worth more than a point release here.
+calloop-wayland-source = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
