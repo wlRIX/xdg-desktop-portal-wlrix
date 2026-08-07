@@ -29,7 +29,7 @@ impl Session {
     /// The frontend is ending the session.
     ///
     /// Note what this does *not* do: emit `Closed`. That signal means "this backend ended it",
-    /// and the caller here already knows -- it is the one ending it. Emitting anyway is a
+    /// and the caller here already knows — it is the one ending it. Emitting anyway is a
     /// common enough portal bug that it is worth naming.
     fn close(&self) {
         tracing::debug!(session = %self.path, "Session.Close");
@@ -38,7 +38,7 @@ impl Session {
         });
     }
 
-    /// Emitted when the backend ends the session on its own -- the captured window went away,
+    /// Emitted when the backend ends the session on its own — the captured window went away,
     /// the output was unplugged, the compositor stopped the capture.
     #[zbus(signal)]
     pub async fn closed(

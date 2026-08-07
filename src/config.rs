@@ -53,6 +53,25 @@ fn milliseconds<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Duration, D::E
     Ok(Duration::from_millis(ms.max(1)))
 }
 
+/// Parse a candidate config file, for `--check-config`.
+///
+/// This program's own serde types are the authority on what `portal.toml` may contain.
+/// `wlrix-settings-daemon` writes a temporary file and runs this against it before renaming it
+/// into place, so a settings app cannot produce a file this backend would refuse -- which
+/// matters because `deny_unknown_fields` means one wrong key costs the *whole* file.
+///
+/// Deliberately not [`Config::load`]: that warns and carries on with defaults, which is right
+/// for a bus-activated backend (refusing to start would make every screen share fail with
+/// nothing on screen to explain why) and exactly wrong here, where the question *is* whether
+/// the file is acceptable.
+pub fn check(path: &std::path::Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("could not read {}: {err}", path.display()))?;
+    toml::from_str::<Config>(&text)
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
 impl Config {
     /// Load the first config file there is, or the defaults.
     ///

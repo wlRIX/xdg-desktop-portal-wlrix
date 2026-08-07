@@ -139,7 +139,7 @@ impl ScreenCast {
 
 #[zbus::interface(name = "org.freedesktop.impl.portal.ScreenCast")]
 impl ScreenCast {
-    /// Begin a session. No UI, no capture -- just somewhere to hang the rest of it.
+    /// Begin a session. No UI, no capture — just somewhere to hang the rest of it.
     async fn create_session(
         &self,
         #[zbus(object_server)] server: &ObjectServer,

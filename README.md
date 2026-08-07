@@ -209,6 +209,29 @@ Not implemented, and deliberately not advertised:
   compositor does not have: there is no `zwlr_virtual_pointer_v1`, and virtual-keyboard is gated behind the sandbox
   check.
 
+## Status
+
+Working end to end. Verified on real hardware with **OBS** under a wlRIX session on the KVM: monitor and window sources,
+the picker with live previews, and a stream that survives the shared window being resized.
+
+## Follow-ups, in the order they are worth doing
+
+1. **dmabuf capture — the priority, and it is compositor work, not portal work.** Every frame is currently a GPU
+   readback into shared memory plus one `memcpy` into PipeWire's buffer: ~14 MB per frame at 1440p, and the readback is
+   the expensive half. It is the single thing standing between this and sharing a 1440p screen without the machine
+   noticing. See the note under *Known gaps* for why the copy cannot simply be removed on this side.
+2. **Embedded cursor mode, unverified.** `cursor_mode=EMBEDDED` is implemented (`PaintCursors` on the capture session)
+   but has never been *seen* working — confirming it needs the pointer physically over the captured area, which no
+   automated test here could arrange. Worth one deliberate look during daily use.
+3. **Restore tokens** (`persist_mode`, interface versions 5 and 6), so a browser can re-share without asking again. The
+   most visible remaining papercut for anyone actually using this every day.
+4. **A live source list while the picker is open.** Windows opening or closing mid-question are not reflected; the
+   manifest is a snapshot taken at `Start`. Would make the stdin manifest a line-delimited stream.
+5. **`org.freedesktop.impl.portal.Screenshot`.** Same capture path, no PipeWire, plus a region-select overlay. Cheap now
+   that everything underneath it exists.
+6. **RemoteDesktop** — blocked on the compositor: there is no `zwlr_virtual_pointer_v1`, and virtual-keyboard is behind
+   the sandbox check.
+
 ## Known gaps
 
 - **The picker is not parented to the window that asked for the share.** The portal's

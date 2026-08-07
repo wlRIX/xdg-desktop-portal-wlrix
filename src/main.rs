@@ -51,14 +51,31 @@ struct Args {
     /// List what can be captured, capture one of each, and exit. A development tool -- see
     /// [`probe`].
     probe: bool,
+    /// Parse a file, say whether it would be accepted as `portal.toml`, and exit.
+    ///
+    /// The exception to "no audience for options": this one is not for a person either. It is
+    /// what `wlrix-settings-daemon` runs against a candidate file before renaming it into
+    /// place, so a settings app cannot write a `portal.toml` this program would refuse.
+    check_config: Option<std::path::PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut args = Args::default();
-    for arg in std::env::args().skip(1) {
+    // `while let` rather than a `for`, so an option can take the argument after it. Only
+    // `--check-config` does, and it is spelled the same way here as in every other wlRIX
+    // component -- `wlrix-settings-daemon` runs all four with one calling convention.
+    let mut argv = std::env::args().skip(1);
+    while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--replace" => args.replace = true,
             "--probe" => args.probe = true,
+            "--check-config" => {
+                args.check_config = Some(
+                    argv.next()
+                        .ok_or_else(|| "--check-config needs a path".to_string())?
+                        .into(),
+                );
+            }
             "--version" | "-V" => {
                 println!("xdg-desktop-portal-wlrix {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -72,6 +89,7 @@ fn parse_args() -> Result<Args, String> {
                      Options:\n  \
                        --replace       take the bus name from whoever already holds it\n  \
                        --probe         list what can be shared, capture one of each to\n                                   /tmp, and exit. Never claims the bus name.\n  \
+                       --check-config <path>  say whether that file would be accepted as\n                                   portal.toml, and exit\n  \
                        -V, --version   version, then exit\n  \
                        -h, --help      this message\n\n\
                      Logging: RUST_LOG, output to the journal. Prefer scoping it to this\n\
@@ -97,6 +115,18 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    // Before the logger: this answers a question about a file and starts nothing, so it must
+    // work identically whether or not there is a journal to write to.
+    if let Some(path) = &args.check_config {
+        return match config::check(path) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(why) => {
+                eprintln!("{why}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     logging::init();
 

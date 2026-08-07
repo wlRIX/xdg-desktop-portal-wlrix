@@ -183,3 +183,97 @@ pub fn spawn(replace: bool) -> Result<(Bus, calloop::channel::Channel<Request>),
 
     Ok((Bus { connection }, channel))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zbus::object_server::Interface;
+
+    /// The introspection XML an interface actually serves.
+    fn introspect(render: impl FnOnce(&mut String)) -> String {
+        let mut xml = String::new();
+        render(&mut xml);
+        xml
+    }
+
+    /// Every `<!-- ... -->` in `xml`, as the XML parser would delimit them.
+    fn comments(xml: &str) -> Vec<&str> {
+        let mut found = Vec::new();
+        let mut rest = xml;
+        while let Some(open) = rest.find("<!--") {
+            let body = &rest[open + 4..];
+            let Some(close) = body.find("-->") else {
+                // An unterminated comment is its own kind of broken, and the assertion below
+                // is not the place to discover it.
+                break;
+            };
+            found.push(&body[..close]);
+            rest = &body[close + 3..];
+        }
+        found
+    }
+
+    /// `--` is forbidden inside an XML comment, and zbus writes the `///` doc comments on this
+    /// backend's interface methods into one **verbatim** -- no escaping, see `to_xml_docs` in
+    /// zbus_macros. The workspace writes its em-dashes as `--`, which everywhere else is fine
+    /// and here produces introspection that no strict XML parser will read.
+    ///
+    /// That is not a cosmetic defect: introspection is what a client's proxy generator consumes,
+    /// so the backend would be undescribable to anything that generates bindings from it. It was
+    /// found in `wlrix-settings-daemon`, whose C# client could not be generated until it was
+    /// fixed; this backend had the same latent problem, and nothing had tripped over it only
+    /// because nothing generates a proxy from it yet.
+    ///
+    /// The rendered XML is checked rather than the source text, so this cannot be fooled by
+    /// where the comment happens to be written.
+    #[test]
+    fn no_interface_doc_comment_can_break_the_introspection_xml() {
+        let (sender, _channel) = calloop::channel::channel::<Request>();
+        let path = OwnedObjectPath::try_from("/org/freedesktop/portal/desktop/session/test")
+            .expect("a valid object path");
+
+        let screencast = screencast::ScreenCast {
+            sender: sender.clone(),
+        };
+        let session = session::Session {
+            path: path.clone(),
+            sender: sender.clone(),
+        };
+        let request = request::PortalRequest { path, sender };
+
+        let interfaces = [
+            (
+                "ScreenCast",
+                introspect(|xml| screencast.introspect_to_writer(xml, 0)),
+            ),
+            (
+                "Session",
+                introspect(|xml| session.introspect_to_writer(xml, 0)),
+            ),
+            (
+                "Request",
+                introspect(|xml| request.introspect_to_writer(xml, 0)),
+            ),
+        ];
+
+        for (name, xml) in &interfaces {
+            // A sanity check on the test itself: an interface that rendered nothing would pass
+            // the real assertion trivially.
+            assert!(xml.contains("<interface"), "{name} introspected to nothing");
+            for comment in comments(xml) {
+                assert!(
+                    !comment.contains("--"),
+                    "{name}: this doc comment makes the introspection XML unparseable:\n{comment}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_comment_scanner_finds_what_it_should() {
+        assert_eq!(comments("<node/>"), Vec::<&str>::new());
+        assert_eq!(comments("<!-- one --><a/><!-- two -->"), [" one ", " two "]);
+        // The shape zbus emits: an open, the lines, then a space before the close.
+        assert_eq!(comments("<!--\n a line\n -->"), ["\n a line\n "]);
+    }
+}
