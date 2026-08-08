@@ -70,3 +70,15 @@ rustix = { version = "1", features = ["fs", "mm"] }
 calloop-wayland-source = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Allocating the buffers the compositor renders captures into.
+#
+# A dmabuf capture has to be *drawn into* memory the GPU owns, and somebody has to allocate it.
+# Not PipeWire: its own pool is memfd-backed, and asking a stream for `SPA_DATA_DmaBuf` means
+# telling it "the application allocates these" (`ALLOC_BUFFERS`). Not the compositor either --
+# `ext-image-copy-capture` has the client provide the buffer. So this program opens the render
+# node the compositor names and allocates through gbm, which is what every screencast portal
+# ends up doing.
+#
+# `default-features = false` drops the `gbm-sys` bundled build; `drm-support` is what makes the
+# buffer objects exportable as dmabuf file descriptors, which is the entire point here.
+gbm = { version = "0.18", default-features = false, features = ["drm-support"] }

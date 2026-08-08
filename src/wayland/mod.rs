@@ -22,6 +22,7 @@
 //! shape `wlrix-idle` uses.
 
 pub mod capture;
+pub mod dmabuf;
 pub mod inventory;
 pub mod shm;
 
@@ -47,6 +48,7 @@ use wayland_protocols::ext::{
     },
     image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1,
 };
+use wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
 
 use crate::Portal;
 use inventory::{Inventory, Monitor, Window};
@@ -69,6 +71,17 @@ pub struct Wayland {
     pub output_sources: Option<ExtOutputImageCaptureSourceManagerV1>,
     pub toplevel_sources: Option<ExtForeignToplevelImageCaptureSourceManagerV1>,
     pub copy: Option<ExtImageCopyCaptureManagerV1>,
+    /// `linux-dmabuf`, for turning an allocated buffer object into a `wl_buffer`.
+    ///
+    /// Optional: without it, or without a render node, capture falls back to shared memory
+    /// rather than failing. Bound at version 3 -- `create_immed` and per-plane modifiers are all
+    /// this needs, and version 4's default-feedback machinery is for clients that *render*.
+    pub dmabuf: Option<ZwpLinuxDmabufV1>,
+    /// The render node the compositor named, opened on first use.
+    ///
+    /// Lazily, because which node it is only becomes known when a capture session announces it,
+    /// and most runs never allocate one at all.
+    pub allocator: Option<std::rc::Rc<dmabuf::Allocator>>,
     pub inventory: Inventory,
     /// Capture sessions in flight, keyed by the session object.
     pub captures: Vec<capture::Capture>,
@@ -110,6 +123,54 @@ impl Wayland {
         )
     }
 
+    /// Allocate a buffer the compositor can render a capture straight into.
+    ///
+    /// `None` whenever anything is missing -- no `linux-dmabuf`, no render node this process can
+    /// open, no format in common. Every one of those is a reason to fall back to shared memory,
+    /// not to fail the share, so none of them is an error here.
+    pub fn dmabuf_buffer(
+        &mut self,
+        qh: &QueueHandle<Portal>,
+        constraints: capture::Constraints,
+        offer: &capture::DmabufOffer,
+    ) -> Option<dmabuf::Buffer> {
+        let global = self.dmabuf.clone()?;
+
+        // Open the render node the first time one is asked for, and re-open if a session names
+        // a different GPU -- which a multi-GPU machine can do.
+        if !self
+            .allocator
+            .as_ref()
+            .is_some_and(|allocator| allocator.serves(offer.device))
+        {
+            match dmabuf::Allocator::open(offer.device) {
+                Ok(allocator) => self.allocator = Some(std::rc::Rc::new(allocator)),
+                Err(err) => {
+                    tracing::warn!("no dmabuf capture: {err}");
+                    self.allocator = None;
+                    return None;
+                }
+            }
+        }
+        let allocator = self.allocator.as_ref()?;
+
+        let (fourcc, modifiers) = pick_format(offer)?;
+        match allocator.allocate(
+            &global,
+            qh,
+            constraints.width,
+            constraints.height,
+            fourcc,
+            modifiers,
+        ) {
+            Ok(buffer) => Some(buffer),
+            Err(err) => {
+                tracing::warn!("no dmabuf capture: {err}");
+                None
+            }
+        }
+    }
+
     /// Make the capture source naming a window.
     pub fn window_source(
         &self,
@@ -122,6 +183,28 @@ impl Wayland {
                 .create_source(&window.handle, qh, ()),
         )
     }
+}
+
+/// `XRGB8888` and `ARGB8888` as DRM fourccs.
+///
+/// The same two the shm path takes, and the same byte order: 32-bit little-endian with the
+/// alpha byte unused in the first. Preferring them keeps one pixel layout through the whole
+/// program -- the PipeWire format, the preview files and the capture all agree -- rather than
+/// letting the compositor's first offer decide, which on this machine is a 16-bit float format.
+const DRM_XRGB8888: u32 = 0x3432_5258;
+const DRM_ARGB8888: u32 = 0x3432_5241;
+
+/// Choose a format from what the compositor offered.
+pub(crate) fn pick_format(offer: &capture::DmabufOffer) -> Option<(u32, &[u64])> {
+    for wanted in [DRM_XRGB8888, DRM_ARGB8888] {
+        if let Some((fourcc, modifiers)) = offer.formats.iter().find(|(code, _)| *code == wanted) {
+            return Some((*fourcc, modifiers));
+        }
+    }
+    // Nothing recognisable. Refusing is right: an unknown fourcc would be allocated, filled,
+    // and handed to an application expecting 32-bit RGB.
+    tracing::warn!("the compositor offered no 32-bit RGB dmabuf format; using shared memory");
+    None
 }
 
 /// Connect, bind the globals, and put the connection on the loop.
@@ -209,6 +292,9 @@ impl Dispatch<WlRegistry, ()> for Portal {
                 }
                 "ext_image_copy_capture_manager_v1" => {
                     portal.wayland.copy = Some(registry.bind(name, 1, qh, ()))
+                }
+                "zwp_linux_dmabuf_v1" if version >= 3 => {
+                    portal.wayland.dmabuf = Some(registry.bind(name, 3, qh, ()))
                 }
                 "ext_foreign_toplevel_list_v1" => {
                     // Bound for its events alone -- the handle is never needed again, since a
@@ -377,6 +463,7 @@ macro_rules! ignore_events {
     )*};
 }
 ignore_events!(
+    ZwpLinuxDmabufV1,
     WlShm,
     WlShmPool,
     WlBuffer,

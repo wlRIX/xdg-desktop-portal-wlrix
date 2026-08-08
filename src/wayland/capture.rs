@@ -82,14 +82,33 @@ pub struct Capture {
     outcome: Option<Outcome>,
     /// Frames asked for, against which the outcomes can be counted.
     requested: u64,
+    /// What the compositor will let this source be rendered into directly, if anything.
+    pub dmabuf: Option<DmabufOffer>,
+}
+
+/// What the compositor will let a capture be rendered straight into.
+///
+/// Settled at `done` alongside [`Constraints`], and kept separate from them because it is
+/// optional: a compositor that offers no dmabuf still offers shm, and the capture works either
+/// way. Only the *choice* of path depends on this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DmabufOffer {
+    /// The render node a buffer must be allocated on, as a `dev_t`.
+    pub device: u64,
+    /// `(fourcc, modifiers)` in the compositor's order of preference.
+    pub formats: Vec<(u32, Vec<u64>)>,
 }
 
 /// Constraint fields as they arrive, before the `done` that makes them a set.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 struct Incoming {
     width: u32,
     height: u32,
     format: Option<Format>,
+    /// The render node a dmabuf must be allocated on, as a `dev_t`.
+    dmabuf_device: Option<u64>,
+    /// Offered `(fourcc, modifiers)`, in the compositor's order of preference.
+    dmabuf: Vec<(u32, Vec<u64>)>,
 }
 
 impl Capture {
@@ -123,6 +142,7 @@ impl Capture {
             frame: None,
             outcome: None,
             requested: 0,
+            dmabuf: None,
         }
     }
 
@@ -135,15 +155,24 @@ impl Capture {
     ///
     /// Does nothing if one is already outstanding or the session has stopped, so a caller
     /// driving this from a timer does not have to track either.
-    pub fn request(&mut self, qh: &QueueHandle<Portal>, buffer: &super::shm::Buffer) {
+    /// Takes the `wl_buffer` and its size rather than a buffer type, because the two kinds --
+    /// shared memory and dmabuf -- are allocated by different machinery and the protocol does
+    /// not care which one this is.
+    pub fn request(
+        &mut self,
+        qh: &QueueHandle<Portal>,
+        buffer: &wayland_client::protocol::wl_buffer::WlBuffer,
+        width: i32,
+        height: i32,
+    ) {
         if self.busy() || self.stopped {
             return;
         }
         let frame = self.session.create_frame(qh, ());
-        frame.attach_buffer(&buffer.buffer);
+        frame.attach_buffer(buffer);
         // The whole buffer: this backend keeps no previous frame to diff against, so there is no
         // damage to report that would be narrower than everything.
-        frame.damage_buffer(0, 0, buffer.width, buffer.height);
+        frame.damage_buffer(0, 0, width, height);
         frame.capture();
         self.outcome = None;
         self.frame = Some(frame);
@@ -214,11 +243,26 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for Portal {
                     capture.incoming.format = Some(format);
                 }
             }
-            // A dmabuf-capable compositor would offer these too. Ignored rather than acted on:
-            // see the note in `shm.rs` -- this backend has no dmabuf path yet, and shm is always
-            // offered alongside.
-            ext_image_copy_capture_session_v1::Event::DmabufFormat { .. }
-            | ext_image_copy_capture_session_v1::Event::DmabufDevice { .. } => {}
+            // What the compositor will let a capture be drawn straight into. Recorded
+            // alongside the shm formats rather than instead of them: a client that cannot
+            // allocate on this device still has the shm path, and picking between them is the
+            // caller's decision, not this module's.
+            ext_image_copy_capture_session_v1::Event::DmabufDevice { device } => {
+                // A `dev_t`, sent as native-endian bytes.
+                match <[u8; 8]>::try_from(device.as_slice()) {
+                    Ok(bytes) => capture.incoming.dmabuf_device = Some(u64::from_ne_bytes(bytes)),
+                    Err(_) => tracing::warn!("the compositor sent a malformed dmabuf device id"),
+                }
+            }
+            ext_image_copy_capture_session_v1::Event::DmabufFormat { format, modifiers } => {
+                // Modifiers arrive as a flat array of native-endian `u64`s.
+                let modifiers: Vec<u64> = modifiers
+                    .chunks_exact(8)
+                    .filter_map(|chunk| <[u8; 8]>::try_from(chunk).ok())
+                    .map(u64::from_ne_bytes)
+                    .collect();
+                capture.incoming.dmabuf.push((format, modifiers));
+            }
             // Everything since the last `done` is one consistent set.
             ext_image_copy_capture_session_v1::Event::Done => {
                 let Some(format) = capture.incoming.format else {
@@ -242,6 +286,31 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for Portal {
                     capture.reconfigured = true;
                 }
                 capture.incoming.format = None;
+
+                // The dmabuf offer is re-sent in full with every update, so it is rebuilt here
+                // and the accumulator cleared -- otherwise a resize would append a second copy
+                // of every format to the first.
+                let offer = capture
+                    .incoming
+                    .dmabuf_device
+                    .filter(|_| !capture.incoming.dmabuf.is_empty())
+                    .map(|device| DmabufOffer {
+                        device,
+                        formats: std::mem::take(&mut capture.incoming.dmabuf),
+                    });
+                capture.incoming.dmabuf.clear();
+                capture.incoming.dmabuf_device = None;
+                if capture.dmabuf != offer {
+                    if let Some(offer) = &offer {
+                        tracing::debug!(
+                            source = %capture.source_id,
+                            device = offer.device,
+                            formats = offer.formats.len(),
+                            "the compositor offers dmabuf capture",
+                        );
+                    }
+                    capture.dmabuf = offer;
+                }
             }
             ext_image_copy_capture_session_v1::Event::Stopped => {
                 tracing::info!(source = %capture.source_id, "the compositor stopped the capture");

@@ -180,7 +180,21 @@ what everything was tuned with. Unknown keys are an error, as elsewhere in wlRIX
 [preview]
 tick_ms = 100     # how often *one* source is captured; they take turns
 tile = [320, 180] # thumbnail size
+
+[capture]
+dmabuf = false    # offer GPU memory as well as shared memory — see below
 ```
+
+`capture.dmabuf` is safe to switch on: the stream offers shared memory alongside the dmabuf, so a consumer that cannot
+import one falls back instead of failing. That is verified — GStreamer declines the dmabuf and streams over shm without
+a hiccup.
+
+It is off by default anyway, because nothing has yet *accepted* one. The compositor renders into a dmabuf happily and
+the stream negotiates a real DRM modifier, but no consumer available here negotiates it, so the last stretch is untested
+against a real application. Turning it on is how that gets tested.
+
+It does not decide whether frames are copied. They are not, either way: both paths render into the very memory the
+consumer reads.
 
 ## While a share is running
 
@@ -216,10 +230,20 @@ the picker with live previews, and a stream that survives the shared window bein
 
 ## Follow-ups, in the order they are worth doing
 
-1. **dmabuf capture — the priority, and it is compositor work, not portal work.** Every frame is currently a GPU
-   readback into shared memory plus one `memcpy` into PipeWire's buffer: ~14 MB per frame at 1440p, and the readback is
-   the expensive half. It is the single thing standing between this and sharing a 1440p screen without the machine
-   noticing. See the note under *Known gaps* for why the copy cannot simply be removed on this side.
+1. **dmabuf capture — built, negotiated, and still never accepted by anything.** Every piece is in place.
+   `wayland/dmabuf.rs` opens the render node the compositor names (by `dev_t`, resolved against `/dev/dri`), allocates
+   through gbm with the offered modifiers, and hands the compositor a `wl_buffer` via
+   `zwp_linux_dmabuf_v1`; `--probe` captures a monitor and a window straight into one and the compositor answers
+   `ready`. The cast offers it as `SPA_DATA_DmaBuf` with one `spa_data` block per plane and the DRM modifier announced
+   as a single **mandatory** property — pinned by test-allocating first, which sidesteps the `DONT_FIXATE` round trip
+   entirely. Verified against an AMD card: modifier `0x200000028a6bf04`, two planes.
+
+   What is left is a consumer that says yes. GStreamer, the only one testable from a terminal here, takes the shm format
+   on offer — correctly, and that fallback is itself worth having proven, but it means the dmabuf path has never carried
+   a live frame through PipeWire. **Switch `capture.dmabuf` on and share to OBS**; that is the whole remaining test, and
+   the answer decides whether it becomes the default.
+
+   The shm path stays regardless: a client, or a machine, that cannot allocate on the render node still has to work.
 2. **Embedded cursor mode, unverified.** `cursor_mode=EMBEDDED` is implemented (`PaintCursors` on the capture session)
    but has never been *seen* working — confirming it needs the pointer physically over the captured area, which no
    automated test here could arrange. Worth one deliberate look during daily use.
@@ -237,11 +261,11 @@ the picker with live previews, and a stream that survives the shared window bein
 - **The picker is not parented to the window that asked for the share.** The portal's
   `parent_window` is a `wayland:` handle for `xdg-foreign`, and Avalonia's Wayland backend implements the *export* half
   of that protocol but not the import half. The handle is logged and otherwise ignored until that lands upstream.
-- **Capture is through shared memory, not dmabuf, and each frame is copied once.** The compositor's
-  `ext-image-copy-capture` advertises no dmabuf constraints yet, so every frame is a GPU readback plus a shm write, plus
-  one `memcpy` into PipeWire's buffer. Noticeable at 1440p60.
+- **Capture is through shared memory unless `capture.dmabuf` is on**, so a frame is still a GPU readback, and at 1440p60
+  that is the cost that remains. What is *not* there any more is a copy on top of it: this backend allocates the buffers
+  itself in both modes, and the compositor renders into the very memory the consumer reads.
 
-  The copy is deliberate. Capturing straight into a PipeWire buffer — zero-copy, and it was built — deadlocks: the
-  compositor's repaint clock and PipeWire's graph cycle each wait on the other, and the stream delivers exactly one
-  frame. The capture therefore owns its own buffer and frames are copied across. Removing the copy means dmabuf, not
-  re-coupling the two clocks; that work belongs in `wlrix-compositor/src/image_capture.rs`.
+  That took two attempts to get right, and the failed one is worth recording. Capturing straight into a PipeWire buffer
+  was blamed on a deadlock between the compositor's repaint clock and PipeWire's graph cycle, and replaced with a
+  per-frame `memcpy` out of a private buffer. The real cause was a missing `process` hook (see `cast/stream.rs`); once
+  that was fixed the direct path was safe, and the copy went with it.

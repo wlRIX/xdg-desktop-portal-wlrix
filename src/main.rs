@@ -144,6 +144,9 @@ fn run(args: &Args) -> Result<(), String> {
         .map_err(|err| format!("could not create the event loop: {err}"))?;
     let handle = event_loop.handle();
     let mut portal = portal::Portal::default();
+    // Read before anything uses it. Without this the file is silently ignored -- which it was,
+    // for as long as this line was missing.
+    portal.config = config::Config::load();
 
     // The compositor first, and the bus name only if that worked. A backend that owned the name
     // without being able to capture anything would have every share fail against it, where

@@ -38,6 +38,10 @@ struct Probe {
     /// Held, not read: the compositor is writing through this `wl_buffer`, and dropping it
     /// would destroy the buffer out from under the frame in flight.
     _buffer: Buffer,
+    /// The dmabuf actually captured into, when one could be allocated. Held for the same reason
+    /// as `_buffer`; its contents cannot be read from the CPU, so success is judged by the
+    /// compositor answering `ready` rather than by counting pixels.
+    dmabuf: Option<crate::wayland::dmabuf::Buffer>,
     width: u32,
     height: u32,
     done: bool,
@@ -157,20 +161,51 @@ pub fn run(
             let Some(constraints) = capture.constraints else {
                 continue;
             };
-            let shm = portal.wayland.shm.clone().ok_or("no wl_shm")?;
-            let len = Buffer::size_for(constraints.width as i32, constraints.height as i32);
-            let memory = Memory::new(len)?;
-            let buffer = Buffer::new(&shm, &qh, Region::whole(memory.as_fd(), len), constraints);
-            capture.request(&qh, &buffer);
             println!(
                 "{label}: constraints {}x{} {:?}",
                 constraints.width, constraints.height, constraints.format
             );
+
+            // Try dmabuf first, which is the whole point of the exercise: it is the only way to
+            // find out whether the compositor can really render into a client-provided GPU
+            // buffer, as opposed to merely offering to.
+            let offer = capture.dmabuf.clone();
+            let dmabuf = offer.as_ref().and_then(|offer| {
+                println!(
+                    "{label}: compositor offers dmabuf on device {} ({} formats)",
+                    offer.device,
+                    offer.formats.len()
+                );
+                portal.wayland.dmabuf_buffer(&qh, constraints, offer)
+            });
+
+            let shm = portal.wayland.shm.clone().ok_or("no wl_shm")?;
+            let len = Buffer::size_for(constraints.width as i32, constraints.height as i32);
+            let memory = Memory::new(len)?;
+            let buffer = Buffer::new(&shm, &qh, Region::whole(memory.as_fd(), len), constraints);
+
+            let capture = portal
+                .wayland
+                .captures
+                .iter_mut()
+                .find(|capture| &capture.source_id == id)
+                .ok_or("the capture went away")?;
+            match &dmabuf {
+                Some(dma) => {
+                    println!("{label}: capturing into a dmabuf");
+                    capture.request(&qh, &dma.buffer, dma.width, dma.height);
+                }
+                None => {
+                    println!("{label}: capturing into shared memory");
+                    capture.request(&qh, &buffer.buffer, buffer.width, buffer.height);
+                }
+            }
             probes.push(Probe {
                 label,
                 path: format!("/tmp/wlrix-portal-probe-{label}.pnm"),
                 memory,
                 _buffer: buffer,
+                dmabuf,
                 width: constraints.width,
                 height: constraints.height,
                 done: false,
@@ -198,6 +233,13 @@ pub fn run(
                 continue;
             };
             match capture.take_outcome() {
+                Some(Outcome::Ready) if probe.dmabuf.is_some() => {
+                    // Nothing to count: the frame is in GPU memory this process cannot map
+                    // cheaply. `ready` from the compositor *is* the result -- it means the
+                    // buffer was accepted, imported and rendered into.
+                    println!("{}: ready — rendered directly into the dmabuf", probe.label);
+                    probe.done = true;
+                }
                 Some(Outcome::Ready) => {
                     let pixels = probe.memory.pixels();
                     write_pnm(&probe.path, probe.width, probe.height, pixels);

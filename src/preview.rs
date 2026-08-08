@@ -239,7 +239,7 @@ impl Previews {
                 shm::Region::whole(scratch.as_fd(), scratch.pixels().len()),
                 constraints,
             );
-            wayland.captures[position].request(qh, &buffer);
+            wayland.captures[position].request(qh, &buffer.buffer, buffer.width, buffer.height);
             return;
         }
     }

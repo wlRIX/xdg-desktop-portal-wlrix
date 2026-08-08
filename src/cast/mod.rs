@@ -31,7 +31,7 @@ use pipewire::{context::ContextRc, core::CoreRc, main_loop::MainLoopRc};
 
 use crate::Portal;
 
-pub use stream::{Cast, Source};
+pub use stream::{Cast, DmabufPlan, Source};
 
 /// The PipeWire connection, kept alive for the life of the process.
 ///

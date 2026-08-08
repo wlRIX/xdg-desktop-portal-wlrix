@@ -186,11 +186,25 @@ impl Portal {
                 still_starting.push(starting);
                 continue;
             };
-            let (Some(shm), Some(qh)) = (&self.wayland.shm, &self.wayland.qh) else {
+            let source_id = starting.id.clone();
+            // Rendering straight into GPU memory, when it is switched on. `settle` returns
+            // `None` for every reason there is to use shared memory instead, so together with
+            // the config flag this is the whole choice.
+            //
+            // Off by default: see `config::Capture::dmabuf`. The stream negotiates correctly
+            // but offers the consumer no non-dmabuf alternative, so switching it on breaks
+            // sharing with anything that cannot take one.
+            let plan = capture
+                .dmabuf
+                .clone()
+                .filter(|_| self.config.capture.dmabuf)
+                .and_then(|offer| {
+                    crate::cast::DmabufPlan::settle(&mut self.wayland, constraints, &offer)
+                });
+            let (Some(shm), Some(qh)) = (self.wayland.shm.clone(), self.wayland.qh.clone()) else {
                 continue;
             };
-            let source_id = starting.id.clone();
-            match crate::cast::Cast::new(&pipewire.core, shm, qh, starting, constraints) {
+            match crate::cast::Cast::new(&pipewire.core, &shm, &qh, starting, constraints, plan) {
                 Ok(cast) => {
                     // The stream was built *from* these constraints, so the pending
                     // "reconfigured" they arrived with is answered, not a resize. Clearing it
@@ -219,7 +233,7 @@ impl Portal {
     /// Coupling them -- capturing straight into a PipeWire buffer -- deadlocks; see the
     /// `crate::cast::stream` module docs.
     fn pump_frames(&mut self) {
-        let (Some(qh), Some(shm)) = (self.wayland.qh.clone(), self.wayland.shm.clone()) else {
+        let Some(qh) = self.wayland.qh.clone() else {
             return;
         };
 
@@ -238,7 +252,7 @@ impl Portal {
             // the node id the application was given -- see `Cast::reconfigure`.
             if self.wayland.captures[capture].take_reconfigure()
                 && let Some(constraints) = self.wayland.captures[capture].constraints
-                && let Err(err) = self.casts[index].reconfigure(&shm, &qh, constraints)
+                && let Err(err) = self.casts[index].reconfigure(constraints)
             {
                 tracing::error!(source = %source_id, "{err}");
             }
@@ -246,19 +260,20 @@ impl Portal {
             match self.wayland.captures[capture].take_outcome() {
                 Some(Outcome::Ready) => self.casts[index].frame_captured(),
                 Some(Outcome::Failed(reason)) => {
-                    tracing::debug!(source = %source_id, "frame failed: {reason}")
+                    tracing::debug!(source = %source_id, "frame failed: {reason}");
+                    self.casts[index].frame_failed();
                 }
                 None => {}
             }
 
-            // Hand the newest frame on if PipeWire has somewhere to put it.
-            self.casts[index].submit();
-
             // Then keep the capture busy, whatever PipeWire is doing. Disjoint fields, so both
             // can be borrowed at once: the buffer belongs to `casts`, the capture to `wayland`.
-            if !self.wayland.captures[capture].busy() {
-                let buffer = self.casts[index].capture_buffer();
-                self.wayland.captures[capture].request(&qh, buffer);
+            // Only when there is somewhere to draw. With shared memory that is always; with
+            // dmabuf it is whenever PipeWire has offered a buffer.
+            if !self.wayland.captures[capture].busy()
+                && let Some((wl, w, h)) = self.casts[index].next_target()
+            {
+                self.wayland.captures[capture].request(&qh, &wl, w, h);
             }
         }
     }

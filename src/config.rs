@@ -17,6 +17,27 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     pub preview: Preview,
+    pub capture: Capture,
+}
+
+/// How frames are got out of the compositor.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Capture {
+    /// Render captures straight into GPU memory instead of copying them through the CPU.
+    ///
+    /// Safe to switch on: the stream offers shared memory alongside, so a consumer that cannot
+    /// import a dmabuf falls back rather than failing. Verified -- GStreamer declines the
+    /// dmabuf and streams over shm without a hiccup.
+    ///
+    /// **Off by default anyway**, because nothing has yet *accepted* one. The path is proven as
+    /// far as the compositor, which renders into a dmabuf happily, but no consumer available
+    /// here negotiates it, so the last stretch is untested against a real application. Turning
+    /// this on is how that gets tested.
+    ///
+    /// Note this does not decide whether frames are copied: they are not, either way. The shm
+    /// path renders into the memfd the consumer reads, exactly as the dmabuf path does.
+    pub dmabuf: bool,
 }
 
 /// How the picker's thumbnails are produced. See [`crate::preview`] for why these are the knobs.
