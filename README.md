@@ -50,7 +50,9 @@ the shape `wlrix-idle` uses — so there is no shared mutable state and no lock 
 cargo build
 ```
 
-Needs `libpipewire-0.3` and `libspa-0.2` development files.
+Needs `libpipewire-0.3`, `libspa-0.2` and `libgbm` development files. (On Debian and Ubuntu:
+`libpipewire-0.3-dev libspa-0.2-dev libgbm-dev`.) Missing any of them shows up only as a link
+error from `cargo build` — `cargo clippy` never links, so it passes regardless.
 
 ## Install
 

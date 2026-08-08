@@ -12,13 +12,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Unlike the other wlRIX Rust components, this one links C libraries: `pipewire-sys` and
-      # `libspa-sys` build against the system PipeWire through pkg-config, and there is no
-      # vendored fallback. clang is for their bindgen.
+      # Unlike the other wlRIX Rust components, this one links C libraries, none with a vendored
+      # fallback. `pipewire-sys` and `libspa-sys` find theirs through pkg-config (clang is for
+      # their bindgen), so a missing one is a clear build-script error.
+      #
+      # **libgbm is not like that.** `gbm-sys` ships pre-generated bindings, runs no build script
+      # and asks pkg-config nothing -- it is a bare `#[link(name = "gbm")]`, so the first and only
+      # thing that notices its absence is the linker. That makes it invisible to `cargo fmt` and
+      # `cargo clippy`, which never link: those two steps going green says nothing about whether
+      # the C libraries are here. It also has to be `libgbm-dev` and not the `libgbm1` that mesa
+      # already pulls in, because `-lgbm` needs the unversioned `.so` symlink.
       - name: System dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev libspa-0.2-dev clang
+          sudo apt-get install -y libpipewire-0.3-dev libspa-0.2-dev libgbm-dev clang
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
