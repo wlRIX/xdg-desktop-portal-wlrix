@@ -29,6 +29,7 @@ mod picker;
 mod portal;
 mod preview;
 mod probe;
+mod shot;
 mod signals;
 mod wayland;
 

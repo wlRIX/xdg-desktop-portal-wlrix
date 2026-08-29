@@ -13,7 +13,7 @@ use zbus::zvariant::OwnedObjectPath;
 
 use crate::{
     config::Config,
-    dbus::{PortalResponse, Reply, Request, SelectOptions, Stream},
+    dbus::{PortalResponse, Reply, Request, SelectOptions, ShotOptions, Stream},
     wayland::capture::{Capture, Outcome, Purpose},
 };
 
@@ -67,6 +67,23 @@ pub struct Portal {
     pub picker: Option<crate::picker::Picker>,
     /// What the open picker was asked, kept so its answer can be checked against it.
     picking: Option<Picking>,
+    /// The screenshot tool, while one is running. At most one, for the same reason there is at
+    /// most one picker: two full-screen overlays at once would be two questions about the same
+    /// screen, and only the top one could be answered.
+    pub shot: Option<crate::shot::Shot>,
+    /// The `Screenshot` call that tool is answering.
+    shooting: Option<Shooting>,
+    /// Bumped per screenshot, so two from one portal do not land on the same filename.
+    shots_taken: u64,
+    /// The file the last screenshot went to, kept so it can be taken away again.
+    ///
+    /// What the frontend does with the file it is handed is not documented and not something
+    /// to guess at: it may copy it into the requesting application's document store, or it may
+    /// hand the URI straight on. Either way it has finished by the time the call has returned,
+    /// so removing the previous one when the next is taken -- and the last one on the way out
+    /// -- bounds this to a single file per running portal whichever it turns out to be.
+    /// Leaving them would accumulate pictures of somebody's screen in the runtime directory.
+    last_shot: Option<std::path::PathBuf>,
     pub config: Config,
     /// Captures opened for a `Start` whose stream cannot exist yet.
     ///
@@ -88,6 +105,14 @@ fn session_key(path: &OwnedObjectPath) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
+}
+
+/// A `Screenshot` call waiting on the tool.
+struct Shooting {
+    reply: Reply<String>,
+    /// Where the tool was told to write, so the answer can be checked against it -- the tool
+    /// is a separate process and its answer is untrusted input, exactly as the picker's is.
+    path: std::path::PathBuf,
 }
 
 /// The question a running picker was asked.
@@ -146,6 +171,10 @@ impl Portal {
             self.end_session(&path);
         }
         self.picker = None;
+        // Before anything else that is on screen: a screenshot overlay left up is a frozen
+        // picture of the desktop covering the real one, with nothing listening for an answer.
+        self.shot = None;
+        self.forget_last_shot();
         if let Some(previews) = self.previews.take() {
             previews.close(&mut self.wayland);
         }
@@ -426,6 +455,12 @@ impl Portal {
                 parent_window,
                 reply,
             } => self.start(session, request, app_id, parent_window, reply),
+            Request::Screenshot {
+                request,
+                app_id,
+                options,
+                reply,
+            } => self.screenshot(request, app_id, options, reply),
             Request::Cancel { request } => self.cancel(request),
             Request::CloseSession { session } => self.close_session(session),
         }
@@ -830,6 +865,159 @@ impl Portal {
         Ok(())
     }
 
+    /// `Screenshot`: take a picture and answer with where it went.
+    ///
+    /// Much shorter than [`Portal::start`], and the difference is the point: there is no
+    /// session, no capture and no PipeWire here. The tool does all of it -- see
+    /// [`crate::shot`] for why that rather than a second implementation in this process.
+    fn screenshot(
+        &mut self,
+        request: OwnedObjectPath,
+        app_id: String,
+        options: ShotOptions,
+        reply: Reply<String>,
+    ) {
+        // One at a time. A second full-screen overlay over the first would be two questions
+        // about the same screen with only the top one answerable.
+        if self.shot.is_some() {
+            tracing::warn!("a screenshot is already being taken; refusing a second");
+            reply.fail(PortalResponse::Ended);
+            return;
+        }
+
+        self.shots_taken += 1;
+        let path = match crate::shot::destination(self.shots_taken) {
+            Ok(path) => path,
+            Err(err) => {
+                tracing::error!("{err}");
+                reply.fail(PortalResponse::Ended);
+                return;
+            }
+        };
+
+        let manifest = crate::shot::Manifest {
+            app_id,
+            interactive: options.interactive,
+            target: options.target,
+            // Always false, and that is not the same as "no cursor". The interface has no
+            // key for it, so this backend has nothing to say; the tool ORs this with its own
+            // `screenshot.toml`, which is where the user says what their screenshots look
+            // like. Adding a second setting here would give the same thing two homes that
+            // could disagree.
+            cursor: false,
+            path: path.display().to_string(),
+        };
+
+        let mut shot = match crate::shot::Shot::spawn(&manifest, request) {
+            Ok(shot) => shot,
+            Err(err) => {
+                tracing::error!("{err}");
+                reply.fail(PortalResponse::Ended);
+                return;
+            }
+        };
+        if let Err(err) = self.watch_shot(&mut shot) {
+            tracing::error!("{err}");
+            shot.cancel();
+            reply.fail(PortalResponse::Ended);
+            return;
+        }
+
+        self.shot = Some(shot);
+        self.shooting = Some(Shooting { reply, path });
+    }
+
+    /// Watch the tool's stdout, so its answer arrives as an event like anything else.
+    ///
+    /// The same arrangement [`Portal::watch_picker`] uses, and for the same reason: the user
+    /// may take a while over the selection, and this process still has to answer
+    /// `Request.Close` and keep any cast already running.
+    fn watch_shot(&mut self, shot: &mut crate::shot::Shot) -> Result<(), String> {
+        let handle = self
+            .handle
+            .clone()
+            .ok_or("no event loop to watch the screenshot tool")?;
+        let stdout = shot
+            .take_stdout()
+            .ok_or("the screenshot tool has no stdout")?;
+        let flags = rustix::fs::fcntl_getfl(&stdout)
+            .map_err(|err| format!("could not read the tool's stdout flags: {err}"))?;
+        rustix::fs::fcntl_setfl(&stdout, flags | rustix::fs::OFlags::NONBLOCK)
+            .map_err(|err| format!("could not make the tool's stdout non-blocking: {err}"))?;
+
+        handle
+            .insert_source(
+                calloop::generic::Generic::new(
+                    stdout,
+                    calloop::Interest::READ,
+                    calloop::Mode::Level,
+                ),
+                |_, stdout, portal: &mut Portal| {
+                    let Some(shot) = &mut portal.shot else {
+                        return Ok(calloop::PostAction::Remove);
+                    };
+                    if !shot.read_available(&**stdout) {
+                        return Ok(calloop::PostAction::Continue);
+                    }
+                    // stdout closed: the tool is done talking.
+                    if let Some(shot) = portal.shot.take() {
+                        portal.shot_finished(shot.finish());
+                    }
+                    Ok(calloop::PostAction::Remove)
+                },
+            )
+            .map_err(|err| format!("could not watch the screenshot tool: {err}"))?;
+        Ok(())
+    }
+
+    /// Answer the `Screenshot` call with what the tool did.
+    fn shot_finished(&mut self, outcome: crate::shot::Outcome) {
+        let Some(shooting) = self.shooting.take() else {
+            return;
+        };
+        match outcome {
+            crate::shot::Outcome::Taken(answer) => {
+                // The tool is a separate process and its answer is input like any other. It is
+                // told where to write and may only confirm that path: a different one would
+                // hand the application a URI for a file this backend never asked to exist,
+                // which is how a helper turns into a way to read somebody else's files.
+                if std::path::Path::new(&answer.path) != shooting.path {
+                    tracing::warn!(
+                        answered = %answer.path,
+                        asked = %shooting.path.display(),
+                        "the screenshot tool wrote somewhere it was not asked to; refusing it",
+                    );
+                    shooting.reply.fail(PortalResponse::Ended);
+                    return;
+                }
+                self.forget_last_shot();
+                let uri = crate::shot::file_uri(&shooting.path);
+                tracing::info!(uri = %uri, "screenshot taken");
+                self.last_shot = Some(shooting.path);
+                shooting.reply.send(PortalResponse::Success, uri);
+            }
+            crate::shot::Outcome::Canceled => {
+                tracing::info!("the screenshot was canceled");
+                shooting.reply.fail(PortalResponse::Canceled);
+            }
+            crate::shot::Outcome::Failed(err) => {
+                tracing::error!("{err}");
+                shooting.reply.fail(PortalResponse::Ended);
+            }
+        }
+    }
+
+    /// Take away the file the previous screenshot went to.
+    ///
+    /// Best effort: a leftover file in the runtime directory is cleaned up at logout anyway,
+    /// and failing to remove one is not worth failing anything over -- the same reasoning
+    /// `Previews::close` gives for its own directory.
+    fn forget_last_shot(&mut self) {
+        if let Some(path) = self.last_shot.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
     /// `Request.Close`: the application gave up while the picker was up.
     fn cancel(&mut self, request: OwnedObjectPath) {
         // Take the dialog off the screen. Leaving it up would ask the user to choose a source
@@ -838,6 +1026,13 @@ impl Portal {
             && picker.request == request
         {
             picker.cancel();
+        }
+        // And the screenshot overlay, which covers the whole screen and would otherwise sit
+        // there frozen over a desktop the user cannot reach.
+        if let Some(shot) = &mut self.shot
+            && shot.request == request
+        {
+            shot.cancel();
         }
 
         let pending = self
@@ -858,6 +1053,15 @@ impl Portal {
             }
             // Common and harmless: the call finished a moment before the cancel arrived.
             None => tracing::debug!(request = %request, "cancel for a call that already finished"),
+        }
+
+        // A screenshot has no session to hang its reply on, so killing the tool above is not
+        // enough -- the outstanding `Screenshot` still has to be answered, or the frontend
+        // waits on a reply that is never coming. Taken here rather than left to the tool's
+        // stdout closing, which would answer `Canceled` a moment later anyway but only if the
+        // child dies cleanly.
+        if let Some(shooting) = self.shooting.take() {
+            shooting.reply.fail(PortalResponse::Canceled);
         }
     }
 

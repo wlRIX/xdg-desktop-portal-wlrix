@@ -1,6 +1,6 @@
 [portal]
 DBusName=org.freedesktop.impl.portal.desktop.wlrix
-Interfaces=org.freedesktop.impl.portal.ScreenCast
+Interfaces=org.freedesktop.impl.portal.ScreenCast;org.freedesktop.impl.portal.Screenshot
 # Deprecated in favor of wlrix-portals.conf, which is what current xdg-desktop-portal reads.
 # Kept for older versions, which have no other way to know this backend belongs to wlRIX.
 UseIn=wlRIX

@@ -77,8 +77,10 @@ install:
       echo "installed $f"
   done
   echo
-  echo "The source picker is a separate program: wlrix-source-picker, from wlrix-apps."
-  echo "Without it on PATH a screen-share request has no way to ask which source to share."
+  echo "Two helper programs are separate and must be on PATH:"
+  echo "  wlrix-source-picker  (wlrix-apps)      asks which source to share"
+  echo "  wlrix-screenshot     (wlrix-screenshot) takes the picture for Screenshot"
+  echo "Without them, a request against that interface has no way to be answered."
 
 [doc("Remove what install put down")]
 uninstall:

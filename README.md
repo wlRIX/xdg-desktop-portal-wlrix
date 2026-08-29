@@ -1,8 +1,8 @@
 # xdg-desktop-portal-wlrix
 
-The wlRIX desktop portal backend. Implements `org.freedesktop.impl.portal.ScreenCast`, which is what
-`xdg-desktop-portal` hands an application's screen-sharing request to — so that Firefox, OBS and anything else that asks
-for a screen gets one.
+The wlRIX desktop portal backend. Implements `org.freedesktop.impl.portal.ScreenCast` and
+`org.freedesktop.impl.portal.Screenshot`, which is what `xdg-desktop-portal` hands an application's screen-sharing and
+screenshot requests to — so that Firefox, OBS and anything else that asks for a screen gets one.
 
 - **Language:** Rust
 - **License:** GPL-3.0-or-later
@@ -29,8 +29,9 @@ Two processes, deliberately.
 
 |                           |                                                                                        |
 |---------------------------|----------------------------------------------------------------------------------------|
-| **this**                  | Rust. D-Bus, PipeWire, and all screen capture.                                         |
+| **this**                  | Rust. D-Bus, PipeWire, and the capture behind a cast.                                  |
 | **`wlrix-source-picker`** | C#/Avalonia, from `wlrix-apps`. The dialog that asks which monitor or window to share. |
+| **`wlrix-screenshot`**    | Rust, its own repo. Takes the picture for `Screenshot`, region overlay and all.        |
 
 The split is not about taste. A ScreenCast portal has to produce a PipeWire stream, and PipeWire has no C# bindings —
 SPA's POD builders are `static inline` in the C headers with no exported symbols, so they cannot even be reached by
@@ -40,6 +41,12 @@ toolkit.
 
 So the daemon captures everything and publishes preview frames into `$XDG_RUNTIME_DIR`; the picker reads them and draws.
 The picker binds no Wayland protocols at all.
+
+`wlrix-screenshot` is a third program and the split there is different again: it is spawned for the whole job, capture
+included, rather than only for the dialog. A screenshot needs a fullscreen region overlay, which needs layer shell,
+which the tool already has — and this backend would otherwise gain a PNG encoder, a file-naming policy and a second
+implementation of the region UI for no gain. It is spawned exactly as the picker is; see
+[The screenshot contract](#the-screenshot-contract).
 
 Internally one calloop loop owns all state. D-Bus runs on its own thread and reports in through a `calloop::channel` —
 the shape `wlrix-idle` uses — so there is no shared mutable state and no lock between the two.
@@ -51,8 +58,8 @@ cargo build
 ```
 
 Needs `libpipewire-0.3`, `libspa-0.2` and `libgbm` development files. (On Debian and Ubuntu:
-`libpipewire-0.3-dev libspa-0.2-dev libgbm-dev`.) Missing any of them shows up only as a link
-error from `cargo build` — `cargo clippy` never links, so it passes regardless.
+`libpipewire-0.3-dev libspa-0.2-dev libgbm-dev`.) Missing any of them shows up only as a link error from `cargo build` —
+`cargo clippy` never links, so it passes regardless.
 
 ## Install
 
@@ -173,6 +180,46 @@ Sources take turns being captured (the protocol has no server-side downscale, so
 with several sources each tile refreshes roughly once a second rather than at video rate. `tick_ms` and `tile` in
 `portal.toml` tune that.
 
+## The screenshot contract
+
+`wlrix-screenshot` is spawned with `--portal` for one picture and exits with the answer. The same shape as the picker's
+contract above, deliberately — one kind of helper, one thing to remember.
+
+**In** — a JSON manifest on stdin, closed straight after:
+
+```json
+{
+  "app_id": "org.gnome.Screenshot",
+  "interactive": true,
+  "target": 4,
+  "cursor": false,
+  "path": "/run/user/1000/wlrix-portal/screenshot-4213-1.png"
+}
+```
+
+`target` is the interface's own value: `1` screen, `4` area. `0` means the application did not say, which the tool
+treats as an area. `cursor` is always `false` — the interface has no key for it, so this backend has nothing to say, and
+the tool ORs it with its own `screenshot.toml` rather than giving the same setting two homes that can disagree.
+
+**Out** — on stdout, when the picture was taken:
+
+```json
+{
+  "path": "/run/user/1000/wlrix-portal/screenshot-4213-1.png"
+}
+```
+
+**Exit code** — `0` taken, `1` cancelled, anything else failed. Both are checked, as with the picker.
+
+**This backend names the file, and the answer may only confirm it.** A tool answering with a different path is refused
+rather than passed on: the helper is a separate process and its answer is input, and a URI for a file this backend never
+asked to exist is how a helper turns into a way to read somebody else's files.
+
+The file goes in `$XDG_RUNTIME_DIR/wlrix-portal/` rather than in the user's Pictures directory, because a portal
+screenshot is not one the user asked to keep — the frontend hands it to the requesting application. What the frontend
+does with it afterwards is not documented, so rather than guess, this backend removes the previous file when the next
+screenshot is taken and the last one when it stops: one file per running portal, whichever the answer turns out to be.
+
 ## Configuration
 
 `$XDG_CONFIG_HOME/wlrix/portal.toml`, else `/etc/wlrix/portal.toml`. There is no file by default and the defaults are
@@ -211,9 +258,22 @@ consumer reads.
 
 ## What is implemented
 
-Interface version 4. Monitor and window sources; hidden and embedded cursor modes.
+**ScreenCast**, interface version 4. Monitor and window sources; hidden and embedded cursor modes.
+
+**Screenshot**, interface version 3, with `AvailableTargets` = `Screen | Area`. Both go through `wlrix-screenshot`; the
+area target is its region overlay.
 
 Not implemented, and deliberately not advertised:
+
+- **`Screenshot`'s `Window` and `ActiveWindow` targets.** `Window` means one the user picks, which needs a window picker
+  the tool does not have. `ActiveWindow` needs the focused window's **frame** rectangle, and no client can work that
+  out — the compositor draws wlRIX's 4Dwm frames outside the window's own surface tree, so a per-toplevel capture comes
+  back with no titlebar. The compositor hands that rectangle to `wlrix-screenshot` directly for Alt+Print, and nothing
+  reaches it from here.
+- **`PickColor`.** The method is served, because a backend that claims an interface serves all of it — a frontend
+  calling a method that is simply absent gets a D-Bus error rather than a portal response the application knows how to
+  show — but it answers "ended". Claiming `Screenshot` takes `PickColor` with it: `portals.conf` names whole interfaces,
+  and there is no way to hand one method back to another backend.
 
 - **Cursor metadata** (`AvailableCursorModes` bit 4) — needs
   `ext_image_copy_capture_cursor_session_v1`, which the compositor does not implement.
@@ -227,8 +287,19 @@ Not implemented, and deliberately not advertised:
 
 ## Status
 
-Working end to end. Verified on real hardware with **OBS** under a wlRIX session on the KVM: monitor and window sources,
-the picker with live previews, and a stream that survives the shared window being resized.
+**ScreenCast** works end to end. Verified on real hardware with **OBS** under a wlRIX session on the KVM: monitor and
+window sources, the picker with live previews, and a stream that survives the shared window being resized.
+
+**Screenshot** is verified end to end against the nested compositor: a `Screen` request answers `Success` with a
+`file://` URI, and the file behind it is a real 1280×800 screenshot of the desktop. The failure paths were exercised
+against a stand-in helper on a private bus — a helper answering with a path it was not asked for is refused with
+`Ended`, a helper reporting a cancel comes back as `Canceled` rather than an error, and the runtime directory is empty
+after the backend stops. Not yet done with a real application asking through the frontend, and `Area` has only been
+driven by hand rather than through `interactive: true` from a browser.
+
+Testing the D-Bus half needs `PIPEWIRE_RUNTIME_DIR` pointed at the real one when the nested rig moves
+`XDG_RUNTIME_DIR`: this backend takes the bus name only after *both* the compositor and PipeWire are up, so a
+screenshot-only test still fails at PipeWire without it.
 
 ## Follow-ups, in the order they are worth doing
 
@@ -253,8 +324,9 @@ the picker with live previews, and a stream that survives the shared window bein
    most visible remaining papercut for anyone actually using this every day.
 4. **A live source list while the picker is open.** Windows opening or closing mid-question are not reflected; the
    manifest is a snapshot taken at `Start`. Would make the stdin manifest a line-delimited stream.
-5. **`org.freedesktop.impl.portal.Screenshot`.** Same capture path, no PipeWire, plus a region-select overlay. Cheap now
-   that everything underneath it exists.
+5. **`PickColor`.** The one method this backend serves and does not implement. `wlrix-screenshot`'s overlay already
+   holds the frozen pixels, so it is a crosshair, a zoom loupe and a click away — and until it exists, an application
+   offering "pick a color" under wlRIX gets a failure.
 6. **RemoteDesktop** — blocked on the compositor: there is no `zwlr_virtual_pointer_v1`, and virtual-keyboard is behind
    the sandbox check.
 

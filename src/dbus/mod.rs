@@ -27,6 +27,7 @@
 
 mod request;
 mod screencast;
+mod screenshot;
 mod session;
 
 use std::collections::HashMap;
@@ -34,6 +35,7 @@ use std::collections::HashMap;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 pub use screencast::SelectOptions;
+pub use screenshot::ShotOptions;
 
 /// The name `xdg-desktop-portal` looks up, and the name in `data/wlrix.portal`. The two have to
 /// agree or the frontend finds nothing.
@@ -84,6 +86,14 @@ pub enum Request {
         app_id: String,
         parent_window: String,
         reply: Reply<Vec<Stream>>,
+    },
+    /// Take a screenshot. No session: unlike a cast, it is over when the file is written.
+    Screenshot {
+        request: OwnedObjectPath,
+        app_id: String,
+        options: ShotOptions,
+        /// The `file://` URI of what was written.
+        reply: Reply<String>,
     },
     /// The application gave up on a call that is still outstanding.
     Cancel { request: OwnedObjectPath },
@@ -148,8 +158,17 @@ pub fn spawn(replace: bool) -> Result<(Bus, calloop::channel::Channel<Request>),
         // name the instant it appears never finds an empty connection behind it. That is also
         // why the name is not requested through the builder: it would be taken before this
         // point, leaving a window in which the interface is not there yet.
-        .serve_at(OBJECT_PATH, screencast::ScreenCast { sender })
+        .serve_at(
+            OBJECT_PATH,
+            screencast::ScreenCast {
+                sender: sender.clone(),
+            },
+        )
         .map_err(|err| format!("could not serve the ScreenCast interface: {err}"))?
+        // Two interfaces at one object path, which is what every portal backend does -- the
+        // frontend looks each one up by name on the same object.
+        .serve_at(OBJECT_PATH, screenshot::Screenshot { sender })
+        .map_err(|err| format!("could not serve the Screenshot interface: {err}"))?
         .build()
         .map_err(|err| format!("could not connect to the session bus: {err}"))?;
 
@@ -235,6 +254,9 @@ mod tests {
         let screencast = screencast::ScreenCast {
             sender: sender.clone(),
         };
+        let screenshot = screenshot::Screenshot {
+            sender: sender.clone(),
+        };
         let session = session::Session {
             path: path.clone(),
             sender: sender.clone(),
@@ -245,6 +267,10 @@ mod tests {
             (
                 "ScreenCast",
                 introspect(|xml| screencast.introspect_to_writer(xml, 0)),
+            ),
+            (
+                "Screenshot",
+                introspect(|xml| screenshot.introspect_to_writer(xml, 0)),
             ),
             (
                 "Session",
