@@ -115,7 +115,7 @@ impl Screenshot {
         let request = handle.clone();
         // Awaiting rather than blocking: an interactive shot waits on a person, and a blocked
         // handler would hold zbus's executor and stop `Request.Close` being dispatched -- so
-        // cancelling would only take effect after the thing it cancels had finished. See the
+        // canceling would only take effect after the thing it cancels had finished. See the
         // [`super`] module documentation.
         let (response, uri) = if self
             .sender

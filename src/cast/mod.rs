@@ -58,7 +58,7 @@ impl PipeWire {
 
 /// Connect to PipeWire and put its loop on calloop.
 pub fn connect(handle: &calloop::LoopHandle<'static, Portal>) -> Result<PipeWire, String> {
-    // Initialises the library's globals. Safe to call more than once, but it must happen before
+    // Initializes the library's globals. Safe to call more than once, but it must happen before
     // anything else here.
     pipewire::init();
 

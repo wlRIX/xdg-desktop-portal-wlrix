@@ -327,7 +327,7 @@ impl Cast {
     /// Create the stream and announce the format.
     ///
     /// The format is exact rather than a range: the compositor has already said what size it
-    /// will produce, and offering the graph a choice it cannot honour only invites a
+    /// will produce, and offering the graph a choice it cannot honor only invites a
     /// renegotiation that would have to be rejected.
     pub fn new(
         core: &CoreRc,

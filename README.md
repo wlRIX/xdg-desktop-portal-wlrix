@@ -148,7 +148,7 @@ the source.
 }
 ```
 
-**Exit code** — `0` accepted, `1` cancelled, anything else failed. Both signals are checked: a picker that dies
+**Exit code** — `0` accepted, `1` canceled, anything else failed. Both signals are checked: a picker that dies
 mid-answer produces neither valid stdout nor a zero exit. An empty `sources` with exit 0 counts as canceled. Ids not in
 the manifest are discarded, and more ids than `multiple` allows are truncated.
 
@@ -209,7 +209,7 @@ the tool ORs it with its own `screenshot.toml` rather than giving the same setti
 }
 ```
 
-**Exit code** — `0` taken, `1` cancelled, anything else failed. Both are checked, as with the picker.
+**Exit code** — `0` taken, `1` canceled, anything else failed. Both are checked, as with the picker.
 
 **This backend names the file, and the answer may only confirm it.** A tool answering with a different path is refused
 rather than passed on: the helper is a separate process and its answer is input, and a URI for a file this backend never

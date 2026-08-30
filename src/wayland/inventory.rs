@@ -61,7 +61,7 @@ impl Window {
     ///
     /// The title, because that is how a person tells two windows of the same application apart.
     /// Falling back to the app id, and then to something rather than an empty tile: a window
-    /// with neither is rare but not impossible, and an unlabelled tile is unpickable.
+    /// with neither is rare but not impossible, and an unlabeled tile is unpickable.
     pub fn label(&self) -> &str {
         if !self.title.is_empty() {
             &self.title

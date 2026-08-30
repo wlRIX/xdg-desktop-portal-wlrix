@@ -17,7 +17,7 @@
 //! has to put a picker on screen and wait for a person, which can be a minute. If it *blocked*
 //! that whole time it would also block `Request.Close` -- the call an application makes to
 //! cancel a share it has already asked for -- because zbus would not dispatch it until the
-//! handler holding the executor returned. Cancelling would then only take effect after the
+//! handler holding the executor returned. Canceling would then only take effect after the
 //! thing it cancels had finished, which is the wrong way round.
 //!
 //! So the handlers are `async fn` that `await` a reply from the main loop. Awaiting yields the

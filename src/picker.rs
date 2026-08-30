@@ -184,7 +184,7 @@ impl Picker {
 
         match serde_json::from_slice::<Selection>(&self.output) {
             // Success with an empty list is not a selection. Treated as a cancel rather than an
-            // error: the user ended up sharing nothing, which is what cancelling means, and an
+            // error: the user ended up sharing nothing, which is what canceling means, and an
             // application should not show them a failure for it.
             Ok(selection) if selection.sources.is_empty() => Outcome::Canceled,
             Ok(selection) => Outcome::Accepted(selection),

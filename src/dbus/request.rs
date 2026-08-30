@@ -8,7 +8,7 @@
 //!
 //! This is the reason the ScreenCast handlers are `async fn` rather than blocking -- see the
 //! [`super`] module documentation. A blocked `Start` would not let `Close` be dispatched until
-//! `Start` itself had returned, so cancelling would only take effect after the thing being
+//! `Start` itself had returned, so canceling would only take effect after the thing being
 //! canceled had finished.
 
 use zbus::zvariant::OwnedObjectPath;
