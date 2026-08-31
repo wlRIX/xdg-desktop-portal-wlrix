@@ -201,7 +201,7 @@ pub(crate) fn pick_format(offer: &capture::DmabufOffer) -> Option<(u32, &[u64])>
             return Some((*fourcc, modifiers));
         }
     }
-    // Nothing recognisable. Refusing is right: an unknown fourcc would be allocated, filled,
+    // Nothing recognizable. Refusing is right: an unknown fourcc would be allocated, filled,
     // and handed to an application expecting 32-bit RGB.
     tracing::warn!("the compositor offered no 32-bit RGB dmabuf format; using shared memory");
     None

@@ -334,8 +334,8 @@ impl Tile {
             // aspect ratio does not match.
             source.0 << 16 | (source.1 & 0xffff),
         ];
-        for (slot, value) in header.chunks_exact_mut(4).zip(fields) {
-            slot.copy_from_slice(&value.to_le_bytes());
+        for (slot, value) in header.as_chunks_mut::<4>().0.iter_mut().zip(fields) {
+            *slot = value.to_le_bytes();
         }
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&header)

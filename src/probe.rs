@@ -246,7 +246,9 @@ pub fn run(
                     // Non-black pixels are the proof this is a capture rather than a buffer that
                     // was allocated and never written.
                     let lit = pixels
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .filter(|px| px[..3] != [0, 0, 0])
                         .count();
                     println!(
@@ -292,7 +294,7 @@ pub fn run(
 fn write_pnm(path: &str, width: u32, height: u32, pixels: &[u8]) {
     let mut out = format!("P6\n{width} {height}\n255\n").into_bytes();
     // xrgb8888 little-endian: B, G, R, X per pixel.
-    for px in pixels.chunks_exact(4) {
+    for px in pixels.as_chunks::<4>().0 {
         out.extend_from_slice(&[px[2], px[1], px[0]]);
     }
     if let Err(err) = std::fs::write(path, out) {

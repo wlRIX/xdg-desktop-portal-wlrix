@@ -257,8 +257,10 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for Portal {
             ext_image_copy_capture_session_v1::Event::DmabufFormat { format, modifiers } => {
                 // Modifiers arrive as a flat array of native-endian `u64`s.
                 let modifiers: Vec<u64> = modifiers
-                    .chunks_exact(8)
-                    .filter_map(|chunk| <[u8; 8]>::try_from(chunk).ok())
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .copied()
                     .map(u64::from_ne_bytes)
                     .collect();
                 capture.incoming.dmabuf.push((format, modifiers));
