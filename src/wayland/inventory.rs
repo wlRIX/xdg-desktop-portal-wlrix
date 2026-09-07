@@ -27,6 +27,13 @@ pub type SourceId = String;
 #[derive(Debug, Clone)]
 pub struct Monitor {
     pub output: WlOutput,
+    /// The `wl_registry` global name this was bound from.
+    ///
+    /// Kept because it is the only thing `wl_registry.global_remove` names, and it is **not** the
+    /// bound proxy's object id: the global name is the compositor's number for the advertisement,
+    /// the object id is libwayland's number for this client's proxy, and they live in separate
+    /// spaces that coincide only by accident.
+    pub global: u32,
     /// `wl_output.name`, e.g. `DisplayPort-4`. The identity the rest of wlRIX uses for an
     /// output too -- it is what `outputs.toml` keys on.
     pub name: String,

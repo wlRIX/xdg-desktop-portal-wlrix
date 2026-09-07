@@ -277,6 +277,7 @@ impl Dispatch<WlRegistry, ()> for Portal {
                     let output: WlOutput = registry.bind(name, WL_OUTPUT_VERSION, qh, ());
                     portal.wayland.inventory.monitors.push(Monitor {
                         output,
+                        global: name,
                         name: String::new(),
                         description: String::new(),
                         position: (0, 0),
@@ -303,18 +304,32 @@ impl Dispatch<WlRegistry, ()> for Portal {
                 }
                 _ => {}
             },
-            // A monitor unplugged. The `wl_output` is already dead, so anything capturing it
+            // A monitor went away. The `wl_output` is already dead, so anything capturing it
             // will be stopped by the compositor; this only takes it out of the picker.
+            //
+            // Matched on the **global name**, which is what this event carries. Matching the
+            // bound proxy's `protocol_id()` instead -- as this did -- compares two unrelated
+            // numbering spaces, so nothing was ever removed. Monitors then accumulated: a
+            // display that blanks on the idle timer drops its DP link, the compositor tears the
+            // connector down and builds it again, and the picker grew a second entry for the
+            // same screen every time. Both entries carry the same `wl_output.name`, which is the
+            // source id everything else keys on, so they also collided over one preview file and
+            // one capture -- which is why the duplicates came with no previews and a stream that
+            // showed nothing.
             wl_registry::Event::GlobalRemove { name } => {
-                let before = portal.wayland.inventory.monitors.len();
-                portal
-                    .wayland
-                    .inventory
+                let inventory = &mut portal.wayland.inventory;
+                let Some(index) = inventory
                     .monitors
-                    .retain(|monitor| monitor.output.id().protocol_id() != name);
-                if portal.wayland.inventory.monitors.len() != before {
-                    tracing::info!(global = name, "a monitor went away");
-                }
+                    .iter()
+                    .position(|monitor| monitor.global == name)
+                else {
+                    return;
+                };
+                let monitor = inventory.monitors.remove(index);
+                tracing::info!(global = name, monitor = %monitor.name, "a monitor went away");
+                // The global is gone, but the proxy is this client's and stays alive until it
+                // says otherwise.
+                monitor.output.release();
             }
             _ => {}
         }
@@ -354,12 +369,49 @@ impl Dispatch<WlOutput, ()> for Portal {
             // Everything since the last `done` is one consistent description.
             wl_output::Event::Done => {
                 monitor.ready = true;
+                let (name, size, position) = (monitor.name.clone(), monitor.size, monitor.position);
+                // The global id is in here on purpose: it is what `global_remove` names, and
+                // the bug that made this line worth reading was a comparison against the proxy's
+                // object id instead. Seeing both numbers is how that is caught.
                 tracing::debug!(
-                    name = %monitor.name,
-                    size = ?monitor.size,
-                    position = ?monitor.position,
+                    name = %name,
+                    global = monitor.global,
+                    proxy = monitor.output.id().protocol_id(),
+                    size = ?size,
+                    position = ?position,
                     "monitor",
                 );
+
+                // `wl_output.name` is unique per output and is the id every source is keyed on --
+                // the preview file, the capture, the answer the picker sends back. Two entries
+                // claiming one name is therefore not a cosmetic duplicate: they fight over all
+                // three. It should be impossible now that `global_remove` works, and it is
+                // checked anyway because the failure is silent and disproportionate -- a
+                // duplicate takes the *live* screen's preview and stream down with it.
+                let output = output.clone();
+                let stale: Vec<WlOutput> = portal
+                    .wayland
+                    .inventory
+                    .monitors
+                    .iter()
+                    .filter(|other| other.name == name && other.output != output)
+                    .map(|other| other.output.clone())
+                    .collect();
+                if !stale.is_empty() {
+                    tracing::warn!(
+                        monitor = %name,
+                        stale = stale.len(),
+                        "a monitor was announced again without the old one being removed;                          dropping the older entries",
+                    );
+                    portal
+                        .wayland
+                        .inventory
+                        .monitors
+                        .retain(|other| !stale.contains(&other.output));
+                    for old in stale {
+                        old.release();
+                    }
+                }
             }
             _ => {}
         }

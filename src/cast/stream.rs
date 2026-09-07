@@ -419,7 +419,21 @@ impl Cast {
                         for (index, plane) in planes.iter().enumerate() {
                             let data = datas.add(index);
                             (*data).type_ = plane.kind;
-                            (*data).flags = 0;
+                            // What may be done with this memory, and it is load-bearing:
+                            // `pw_stream` builds the consumer's `mmap` protection out of these
+                            // flags. Left at zero -- which reads like "no opinion" -- the
+                            // consumer's mapping is made `PROT_NONE`, `mmap` succeeds, and
+                            // `spa_data.data` is a perfectly ordinary-looking pointer that
+                            // segfaults on the first byte read. That is what crashed OBS on its
+                            // first frame while GStreamer went on working, because
+                            // `pipewiresrc` maps the fd itself and never touches the pointer.
+                            //
+                            // Both bits, because both are true of the memory: the compositor
+                            // writes the frame into it through the `wl_buffer` and the
+                            // application reads it out. Declaring less than the truth is exactly
+                            // the mistake being fixed here.
+                            (*data).flags =
+                                spa::sys::SPA_DATA_FLAG_READABLE | spa::sys::SPA_DATA_FLAG_WRITABLE;
                             (*data).fd = plane.fd as i64;
                             (*data).mapoffset = 0;
                             (*data).maxsize = plane.size;
@@ -526,9 +540,6 @@ impl Cast {
             .connect(
                 Direction::Output,
                 None,
-                // `MAP_BUFFERS`, because the frame is copied in from the capture's own memory --
-                // without it `spa_data.data` is null and there is nowhere to write.
-                //
                 // Deliberately **not** `DRIVER`, which was tried at length and does not work
                 // here. A driver runs the graph cycle itself, and with it set `process` was
                 // never called at all -- captures ran at full speed into a stream that accepted
