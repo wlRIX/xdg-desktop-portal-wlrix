@@ -210,7 +210,7 @@ fn run(args: &Args) -> Result<(), String> {
 
     tracing::info!("serving {}", dbus::BUS_NAME);
     let signal = event_loop.get_signal();
-    event_loop
+    let outcome = event_loop
         // Finished captures are collected once per dispatch rather than from inside the protocol
         // handlers, which cannot touch the buffers they belong to while the queue borrows the
         // state. It is also the pattern the compositor itself uses for the other side of these
@@ -221,6 +221,32 @@ fn run(args: &Args) -> Result<(), String> {
                 portal.shut_down();
                 signal.stop();
             }
-        })
-        .map_err(|err| format!("event loop failed: {err}"))
+        });
+
+    // The compositor exiting is not a fault. This is a Wayland client whose entire purpose is
+    // capturing that compositor's screen, so its going away is how this program's life normally
+    // ends -- and reporting it as a failure is expensive, because the unit is `Restart=on-failure`
+    // and systemd takes the report at face value. Logging out used to cost the *next* session
+    // all screen sharing: the connection broke, this exited 1, systemd restarted it five times
+    // inside a second against a compositor that had not opened its socket yet, each retry failed
+    // with "no compositor to connect to", the start limit was reached, and the unit stayed dead
+    // for the session that followed -- with nothing on screen to say so. The symptom was OBS
+    // quietly not offering screen capture at all.
+    if let Err(err) = outcome {
+        // `flush` is the liveness question, not a write: both `wayland-backend` implementations
+        // return the stored fatal error from any later call, so this answers even with nothing
+        // queued to send.
+        let compositor_gone = portal
+            .connection
+            .as_ref()
+            .is_none_or(|connection| connection.flush().is_err());
+        if !compositor_gone {
+            return Err(format!("event loop failed: {err}"));
+        }
+        tracing::info!("the compositor went away; stopping");
+        // The same teardown the signal path gets: PipeWire streams and preview files outlive
+        // the Wayland connection and are nobody else's to clean up.
+        portal.shut_down();
+    }
+    Ok(())
 }
