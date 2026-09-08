@@ -1467,6 +1467,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "wlrix-ui"
+version = "0.1.0"
+source = "git+https://github.com/wlRIX/wlrix-ui?rev=33c693db461331cf183fb4e5090fb5c6be71a6f5#33c693db461331cf183fb4e5090fb5c6be71a6f5"
+
+[[package]]
 name = "xdg-desktop-portal-wlrix"
 version = "0.1.0"
 dependencies = [
@@ -1485,6 +1490,7 @@ dependencies = [
  "tracing-subscriber",
  "wayland-client",
  "wayland-protocols",
+ "wlrix-ui",
  "zbus",
 ]
 

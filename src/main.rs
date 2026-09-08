@@ -26,6 +26,7 @@ mod config;
 mod dbus;
 mod logging;
 mod picker;
+mod pidfile;
 mod portal;
 mod preview;
 mod probe;
@@ -195,6 +196,31 @@ fn run(args: &Args) -> Result<(), String> {
         )
         .map_err(|err| format!("could not start the frame timer: {err}"))?;
 
+    // Re-read `portal.toml` on SIGHUP and tell applications what moved.
+    //
+    // This is what makes a scheme change reach a *running* toolkit. The settings daemon writes
+    // the file and signals; the loop compares the new config with the old and emits
+    // `SettingChanged` for the keys that differ. See `dbus::settings::announce`.
+    let (reload, reload_source) = calloop::ping::make_ping()
+        .map_err(|err| format!("could not create the reload signal: {err}"))?;
+    handle
+        .insert_source(reload_source, |_, _, portal: &mut portal::Portal| {
+            let before = std::mem::replace(&mut portal.config, config::Config::load());
+            tracing::info!(
+                palette = portal
+                    .config
+                    .appearance
+                    .palette
+                    .as_deref()
+                    .unwrap_or("default"),
+                "reloaded portal.toml",
+            );
+            if let Some(bus) = &portal.bus {
+                dbus::settings::announce(bus, &before, &portal.config);
+            }
+        })
+        .map_err(|err| format!("could not watch for reloads: {err}"))?;
+
     // Stop cleanly when systemd stops the unit, so every `Drop` runs -- see `signals`.
     let (quit, quit_source) = calloop::ping::make_ping()
         .map_err(|err| format!("could not create the quit signal: {err}"))?;
@@ -206,7 +232,11 @@ fn run(args: &Args) -> Result<(), String> {
             stop.set(true);
         })
         .map_err(|err| format!("could not watch for signals: {err}"))?;
-    signals::forward_to_loop(quit);
+    signals::forward_to_loop(quit, reload);
+
+    // After the bus name is held, so a pidfile only ever names a process that is actually
+    // serving. Kept alive to the end of `run`, which is what removes it.
+    let _pidfile = pidfile::write();
 
     tracing::info!("serving {}", dbus::BUS_NAME);
     let signal = event_loop.get_signal();

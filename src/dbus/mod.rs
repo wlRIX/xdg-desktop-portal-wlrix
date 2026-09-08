@@ -29,6 +29,7 @@ mod request;
 mod screencast;
 mod screenshot;
 mod session;
+pub mod settings;
 
 use std::collections::HashMap;
 
@@ -169,6 +170,11 @@ pub fn spawn(replace: bool) -> Result<(Bus, calloop::channel::Channel<Request>),
         // frontend looks each one up by name on the same object.
         .serve_at(OBJECT_PATH, screenshot::Screenshot { sender })
         .map_err(|err| format!("could not serve the Screenshot interface: {err}"))?
+        // Settings answers from the config file rather than from the compositor, so unlike the
+        // other two it needs no channel back to the loop and no `Request` variant: it is a
+        // synchronous read, the shape `wlrix-idle`'s inhibit interfaces use.
+        .serve_at(OBJECT_PATH, settings::Settings)
+        .map_err(|err| format!("could not serve the Settings interface: {err}"))?
         .build()
         .map_err(|err| format!("could not connect to the session bus: {err}"))?;
 
@@ -264,6 +270,10 @@ mod tests {
         let request = request::PortalRequest { path, sender };
 
         let interfaces = [
+            (
+                "Settings",
+                introspect(|xml| settings::Settings.introspect_to_writer(xml, 0)),
+            ),
             (
                 "ScreenCast",
                 introspect(|xml| screencast.introspect_to_writer(xml, 0)),

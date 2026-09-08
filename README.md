@@ -2,7 +2,8 @@
 
 The wlRIX desktop portal backend. Implements `org.freedesktop.impl.portal.ScreenCast` and
 `org.freedesktop.impl.portal.Screenshot`, which is what `xdg-desktop-portal` hands an application's screen-sharing and
-screenshot requests to — so that Firefox, OBS and anything else that asks for a screen gets one.
+screenshot requests to — so that Firefox, OBS and anything else that asks for a screen gets one — plus
+`org.freedesktop.impl.portal.Settings`, which is how a GTK or Qt application is told what the desktop looks like.
 
 - **Language:** Rust
 - **License:** GPL-3.0-or-later
@@ -220,6 +221,43 @@ screenshot is not one the user asked to keep — the frontend hands it to the re
 does with it afterwards is not documented, so rather than guess, this backend removes the previous file when the next
 screenshot is taken and the last one when it stops: one file per running portal, whichever the answer turns out to be.
 
+## Settings
+
+`org.freedesktop.impl.portal.Settings` is the only way to tell a toolkit two things, and one of them cannot be said
+anywhere else at all.
+
+| Namespace | Key | What wlRIX reports |
+|-----------|-----|--------------------|
+| `org.gnome.desktop.wm.preferences` | `button-layout` | `menu:minimize,maximize` |
+| `org.freedesktop.appearance` | `color-scheme` | 1 for a dark scheme, 2 for a light one |
+| `org.freedesktop.appearance` | `accent-color` | the palette's accent, as `(ddd)` |
+| `org.freedesktop.appearance` | `contrast` | 0 — IRIX schemes are not contrast variants |
+
+**The button layout has no other route.** On Wayland GTK reads `gtk-decoration-layout` from this interface and ignores
+`settings.ini` for it; without a backend it keeps its own compiled `menu:close`. Measured both ways. The layout reported
+here is what `wlrix-compositor`'s own `FrameStyle` has — a menu button, minimize and maximize, and no close, because
+IRIX kept Close in the window menu. A window framed by the compositor still has one: right-click anywhere on the border,
+or press Alt+F4.
+
+Two asymmetries worth knowing, both verified against a live GTK:
+
+- **GTK 3 only asks a portal when `GTK_USE_PORTAL=1`.** `wlrix-session`'s `start-wlrix.sh` exports it for exactly this
+  reason. GTK 4 asks unconditionally.
+- **GTK will not draw the menu button.** GTK 3 draws one only for an application that has an app menu; GTK 4 leaves the
+  leading `windowcontrols` empty. It is asked for anyway — it costs nothing and it says what the layout means.
+
+Everything this backend does not own answers `NotFound`, deliberately. Claiming an interface in `wlrix-portals.conf`
+takes the *whole* interface, so a key invented here is a key the user can no longer set: the font and the cursor theme
+are the ones that would hurt, and both are left alone.
+
+The scheme comes from `[appearance] palette` in `portal.toml`, which `wlrix-settings-daemon` writes alongside the four
+components that draw. It is re-read on every call, so an application started after a change is told the new scheme with
+nothing having to signal this process.
+
+`SettingChanged` is declared and never emitted, which is a decision rather than an omission — see the note at the top of
+`src/dbus/settings.rs`. The short version: the colors reach GTK through `gtk.css`, GTK does not reload that file, and
+flipping only the dark hint would repaint half a window.
+
 ## Configuration
 
 `$XDG_CONFIG_HOME/wlrix/portal.toml`, else `/etc/wlrix/portal.toml`. There is no file by default and the defaults are
@@ -232,7 +270,14 @@ tile = [320, 180] # thumbnail size
 
 [capture]
 dmabuf = false    # offer GPU memory as well as shared memory — see below
+
+[appearance]
+palette = "gotham" # the session's color scheme, for what Settings reports
 ```
+
+`[appearance] palette` is not tuning and is not normally hand-edited: `wlrix-settings-daemon` writes it from
+`appearance.palette` along with the compositor's, the desktop's, the tray's and the screenshot tool's, so a GTK
+application is told the same scheme the chrome around it is drawn in.
 
 `capture.dmabuf` is safe to switch on: the stream offers shared memory alongside the dmabuf, so a consumer that cannot
 import one falls back instead of failing. That is verified — GStreamer declines the dmabuf and streams over shm without

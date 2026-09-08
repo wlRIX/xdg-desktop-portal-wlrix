@@ -8,6 +8,11 @@
 //! Unknown keys are an error, also as elsewhere in wlRIX: a silently ignored typo in a config
 //! file is a bad afternoon. There is no file by default and the defaults below are the ones
 //! everything was tuned with.
+//!
+//! `[appearance]` is the exception to "very little worth configuring": it is not tuning, it is
+//! the session telling this backend which color scheme is in force so it can pass that on to
+//! toolkits. It is written by `wlrix-settings-daemon` rather than by hand -- see
+//! [`crate::dbus::settings`].
 
 use std::{path::PathBuf, time::Duration};
 
@@ -18,6 +23,26 @@ use serde::Deserialize;
 pub struct Config {
     pub preview: Preview,
     pub capture: Capture,
+    pub appearance: Appearance,
+}
+
+/// What this backend reports through `org.freedesktop.impl.portal.Settings`.
+///
+/// Its own section rather than a bare key, matching `compositor.toml` and `desktop.toml` -- a
+/// scheme is not the only thing that will ever go here, and the files read alike.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Appearance {
+    /// A scheme id from `wlrix-ui`: `classic`, `classic-g10`, `classic-g24`, `gotham`.
+    ///
+    /// The same key the compositor, the desktop, the tray and the screenshot tool each carry;
+    /// `wlrix-settings-daemon` writes all five together from `appearance.palette`, so a
+    /// GTK application is told the same scheme the chrome around it is drawn in.
+    ///
+    /// Absent, empty or unrecognized means the default, which is what
+    /// [`wlrix_ui::palette::resolve`] answers. A mistyped scheme name must not stop a toolkit
+    /// being told anything at all.
+    pub palette: Option<String>,
 }
 
 /// How frames are got out of the compositor.

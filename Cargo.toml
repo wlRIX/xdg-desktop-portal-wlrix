@@ -68,6 +68,12 @@ rustix = { version = "1", features = ["fs", "mm"] }
 # everything else. 0.3 rather than the newer 0.4, which wants calloop 0.14: 0.13 is what the rest
 # of wlRIX pins, and one calloop across the workspace is worth more than a point release here.
 calloop-wayland-source = "0.3"
+# The color schemes, for the appearance settings this backend reports: whether the session's
+# scheme is dark, and what its accent color is. `default-features = false` drops the text and
+# image features -- the palette and the pixel primitives carry no dependencies at all, and this
+# program draws nothing. Pinned by rev like every other consumer, so the repo still builds from a
+# fresh standalone clone.
+wlrix-ui = { git = "https://github.com/wlRIX/wlrix-ui", rev = "33c693db461331cf183fb4e5090fb5c6be71a6f5", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Allocating the buffers the compositor renders captures into.
