@@ -3,7 +3,8 @@
 The wlRIX desktop portal backend. Implements `org.freedesktop.impl.portal.ScreenCast` and
 `org.freedesktop.impl.portal.Screenshot`, which is what `xdg-desktop-portal` hands an application's screen-sharing and
 screenshot requests to — so that Firefox, OBS and anything else that asks for a screen gets one — plus
-`org.freedesktop.impl.portal.Settings`, which is how a GTK or Qt application is told what the desktop looks like.
+`org.freedesktop.impl.portal.Settings`, which is how a GTK or Qt application is told what the desktop looks like, and
+`org.freedesktop.impl.portal.FileChooser`, which is the file dialog every sandboxed application opens.
 
 - **Language:** Rust
 - **License:** GPL-3.0-or-later
@@ -33,6 +34,7 @@ Two processes, deliberately.
 | **this**                  | Rust. D-Bus, PipeWire, and the capture behind a cast.                                  |
 | **`wlrix-source-picker`** | C#/Avalonia, from `wlrix-apps`. The dialog that asks which monitor or window to share. |
 | **`wlrix-screenshot`**    | Rust, its own repo. Takes the picture for `Screenshot`, region overlay and all.        |
+| **`wlrix-file-picker`**   | C#/Avalonia, from `wlrix-apps`. The file dialog behind `FileChooser`.                  |
 
 The split is not about taste. A ScreenCast portal has to produce a PipeWire stream, and PipeWire has no C# bindings —
 SPA's POD builders are `static inline` in the C headers with no exported symbols, so they cannot even be reached by
@@ -221,6 +223,67 @@ screenshot is not one the user asked to keep — the frontend hands it to the re
 does with it afterwards is not documented, so rather than guess, this backend removes the previous file when the next
 screenshot is taken and the last one when it stops: one file per running portal, whichever the answer turns out to be.
 
+## The file chooser contract
+
+`wlrix-file-picker` is spawned for one dialog and exits with the answer — the same shape as the picker and the
+screenshot tool, deliberately. It is a **C# application built on `Wlrix.Files.Core`**, the half of the wlRIX file
+manager that carries no window: the same directory reader, the same MIME database, the same icon theme and the same
+`bookmarks.json`. A second implementation in this process would be a worse file manager that disagreed with the real
+one about what a file is called and which icon it has.
+
+**In** — a JSON manifest on stdin, closed straight after:
+
+```json
+{
+  "mode": "open",
+  "app_id": "org.mozilla.firefox",
+  "title": "Upload File",
+  "accept_label": "_Upload",
+  "multiple": true,
+  "directory": false,
+  "current_name": "",
+  "current_folder": "/home/vic/Pictures",
+  "current_file": "",
+  "files": [],
+  "filters": [{ "name": "Images", "rules": [{ "mime": false, "pattern": "*.png" },
+                                            { "mime": true,  "pattern": "image/jpeg" }] }],
+  "current_filter": 0,
+  "choices": [{ "id": "ro", "label": "Open read-only", "options": [], "default": "false" }]
+}
+```
+
+`mode` is `open`, `save` or `save_files`, one per interface method. `current_folder`, `current_file` and each entry of
+`files` arrive on D-Bus as **null-terminated `ay` byte arrays** — a filename on Linux is bytes and need not be valid
+UTF-8 — and are decoded here; one that will not decode is dropped rather than mangled, because a mangled path is a
+dialog opening somewhere that does not exist while looking as though it worked.
+
+`current_filter` is an **index** into `filters`, not the filter itself, so the answer can name one back without the two
+programs comparing structures across a JSON boundary. An application is allowed to send a `current_filter` that is not
+in its own `filters`, and that one is appended to the list here — which is what keeps this an index in every case.
+
+A choice with an empty `options` list is a **checkbox** whose value is the string `"true"` or `"false"`. That is the
+interface's own rule, not a convention invented here.
+
+**Out** — on stdout, when the user accepted:
+
+```json
+{
+  "uris": ["file:///home/vic/Pictures/holiday.png"],
+  "choices": [{ "id": "ro", "value": "false" }],
+  "current_filter": 0,
+  "writable": false
+}
+```
+
+**Exit code** — `0` accepted, `1` canceled, anything else failed. Both are checked, as with the other two helpers, and
+an accepted answer with an empty `uris` is read as a cancel: the user ended up choosing nothing, which is what
+canceling means, and an application should not be shown a failure for it.
+
+**The answer is input, and is checked.** Every URI must be `file:///…` — the interface requires it — and a `save_files`
+answer must have exactly one URI per name it was asked about, in order, because the application matches the two lists
+by position. A bad answer is refused **whole** rather than filtered: a shorter list than the user chose is an
+application silently attaching three files out of four, which is worse than a failure they can see.
+
 ## Settings
 
 `org.freedesktop.impl.portal.Settings` is the only way to tell a toolkit two things, and one of them cannot be said
@@ -308,6 +371,11 @@ consumer reads.
 **Screenshot**, interface version 3, with `AvailableTargets` = `Screen | Area`. Both go through `wlrix-screenshot`; the
 area target is its region overlay.
 
+**FileChooser**, interface version 3 — `OpenFile`, `SaveFile` **and** `SaveFiles`, all three through
+`wlrix-file-picker`. All three, because claiming an interface claims every method on it: an application calling
+`SaveFiles` against a backend that implemented only the other two would get a D-Bus error where `default=gtk` used to
+give it a working dialog.
+
 Not implemented, and deliberately not advertised:
 
 - **`Screenshot`'s `Window` and `ActiveWindow` targets.** `Window` means one the user picks, which needs a window picker
@@ -319,6 +387,10 @@ Not implemented, and deliberately not advertised:
   calling a method that is simply absent gets a D-Bus error rather than a portal response the application knows how to
   show — but it answers "ended". Claiming `Screenshot` takes `PickColor` with it: `portals.conf` names whole interfaces,
   and there is no way to hand one method back to another backend.
+
+- **`FileChooser`'s `modal` option.** Read and ignored. Making the dialog modal to the application that asked needs the
+  `parent_window` handle to reach the toolkit putting it up, and under Wayland that is an `xdg_foreign` exported handle
+  Avalonia cannot import — the same gap the source picker has, recorded under Known gaps.
 
 - **Cursor metadata** (`AvailableCursorModes` bit 4) — needs
   `ext_image_copy_capture_cursor_session_v1`, which the compositor does not implement.
@@ -341,6 +413,14 @@ against a stand-in helper on a private bus — a helper answering with a path it
 `Ended`, a helper reporting a cancel comes back as `Canceled` rather than an error, and the runtime directory is empty
 after the backend stops. Not yet done with a real application asking through the frontend, and `Area` has only been
 driven by hand rather than through `interactive: true` from a browser.
+
+**FileChooser** is verified end to end on a private bus against the nested compositor, with the picker on `PATH`:
+`OpenFile` with two filters, a `current_filter` and a checkbox put the dialog up, and answered `Success` with two
+`file://` URIs, the chosen filter **returned as the tuple the caller sent**, `writable: false`, and the choice. `SaveFile`
+canceled by the user came back `Canceled` rather than an error; `Request.Close` mid-dialog killed the picker and
+answered `Canceled`; and `SaveFiles` with two names — one of them already on disk — answered two URIs in the order
+asked, the taken one renamed. The one thing not yet done is a real application asking through the frontend, which needs
+`sudo just install`.
 
 Testing the D-Bus half needs `PIPEWIRE_RUNTIME_DIR` pointed at the real one when the nested rig moves
 `XDG_RUNTIME_DIR`: this backend takes the bus name only after *both* the compositor and PipeWire are up, so a
@@ -377,9 +457,11 @@ screenshot-only test still fails at PipeWire without it.
 
 ## Known gaps
 
-- **The picker is not parented to the window that asked for the share.** The portal's
+- **Neither helper dialog is parented to the window that asked.** The portal's
   `parent_window` is a `wayland:` handle for `xdg-foreign`, and Avalonia's Wayland backend implements the *export* half
-  of that protocol but not the import half. The handle is logged and otherwise ignored until that lands upstream.
+  of that protocol but not the import half. The handle is logged and otherwise ignored until that lands upstream. It is
+  the source picker's one visible flaw and the file chooser's: `FileChooser`'s `modal` option cannot be honored for the
+  same reason.
 - **Capture is through shared memory unless `capture.dmabuf` is on**, so a frame is still a GPU readback, and at 1440p60
   that is the cost that remains. What is *not* there any more is a copy on top of it: this backend allocates the buffers
   itself in both modes, and the compositor renders into the very memory the consumer reads.

@@ -25,6 +25,7 @@
 //! The executor is zbus's own, ticked by the blocking connection on this thread; the calloop
 //! side never sees it.
 
+mod filechooser;
 mod request;
 mod screencast;
 mod screenshot;
@@ -35,6 +36,7 @@ use std::collections::HashMap;
 
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
+pub use filechooser::{ChooserOptions, ChooserResult, FilterTuple};
 pub use screencast::SelectOptions;
 pub use screenshot::ShotOptions;
 
@@ -95,6 +97,16 @@ pub enum Request {
         options: ShotOptions,
         /// The `file://` URI of what was written.
         reply: Reply<String>,
+    },
+    /// Put a file dialog up. No session, like a screenshot: it is over when the user answers.
+    FileChooser {
+        request: OwnedObjectPath,
+        app_id: String,
+        /// The dialog's title, which is the application's own wording.
+        title: String,
+        mode: crate::filechooser::Mode,
+        options: ChooserOptions,
+        reply: Reply<ChooserResult>,
     },
     /// The application gave up on a call that is still outstanding.
     Cancel { request: OwnedObjectPath },
@@ -168,8 +180,18 @@ pub fn spawn(replace: bool) -> Result<(Bus, calloop::channel::Channel<Request>),
         .map_err(|err| format!("could not serve the ScreenCast interface: {err}"))?
         // Two interfaces at one object path, which is what every portal backend does -- the
         // frontend looks each one up by name on the same object.
-        .serve_at(OBJECT_PATH, screenshot::Screenshot { sender })
+        .serve_at(
+            OBJECT_PATH,
+            screenshot::Screenshot {
+                sender: sender.clone(),
+            },
+        )
         .map_err(|err| format!("could not serve the Screenshot interface: {err}"))?
+        // All three of its methods, because claiming an interface claims every method on it --
+        // an application calling `SaveFiles` against a backend that implements only the other
+        // two gets a D-Bus error where `default=gtk` used to give it a working dialog.
+        .serve_at(OBJECT_PATH, filechooser::FileChooser { sender })
+        .map_err(|err| format!("could not serve the FileChooser interface: {err}"))?
         // Settings answers from the config file rather than from the compositor, so unlike the
         // other two it needs no channel back to the loop and no `Request` variant: it is a
         // synchronous read, the shape `wlrix-idle`'s inhibit interfaces use.
@@ -263,6 +285,9 @@ mod tests {
         let screenshot = screenshot::Screenshot {
             sender: sender.clone(),
         };
+        let chooser = filechooser::FileChooser {
+            sender: sender.clone(),
+        };
         let session = session::Session {
             path: path.clone(),
             sender: sender.clone(),
@@ -281,6 +306,10 @@ mod tests {
             (
                 "Screenshot",
                 introspect(|xml| screenshot.introspect_to_writer(xml, 0)),
+            ),
+            (
+                "FileChooser",
+                introspect(|xml| chooser.introspect_to_writer(xml, 0)),
             ),
             (
                 "Session",

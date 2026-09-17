@@ -6,6 +6,12 @@
 //! to share; the frontend asks this program which one, and this program asks the user, captures
 //! it, and publishes it as a PipeWire node the browser can consume.
 //!
+//! Also `Screenshot`, `Settings` and `FileChooser`. The last two are not about capture at all
+//! and are here because a portal backend is per-desktop rather than per-feature: one bus name
+//! answers for everything wlRIX wants to answer for, and every interface it does not claim
+//! falls through to another backend. `FileChooser` is what puts a wlRIX file dialog in front of
+//! a sandboxed application instead of a GTK one.
+//!
 //! ## Why this exists rather than `xdg-desktop-portal-wlr`
 //!
 //! That backend speaks `wlr-screencopy`, which can capture **outputs only** -- "share a single
@@ -24,6 +30,7 @@
 mod cast;
 mod config;
 mod dbus;
+mod filechooser;
 mod logging;
 mod picker;
 mod pidfile;

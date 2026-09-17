@@ -13,7 +13,10 @@ use zbus::zvariant::OwnedObjectPath;
 
 use crate::{
     config::Config,
-    dbus::{PortalResponse, Reply, Request, SelectOptions, ShotOptions, Stream},
+    dbus::{
+        ChooserOptions, ChooserResult, PortalResponse, Reply, Request, SelectOptions, ShotOptions,
+        Stream,
+    },
     wayland::capture::{Capture, Outcome, Purpose},
 };
 
@@ -73,6 +76,12 @@ pub struct Portal {
     pub shot: Option<crate::shot::Shot>,
     /// The `Screenshot` call that tool is answering.
     shooting: Option<Shooting>,
+    /// The file chooser, while one is up. At most one, for the same reason there is at most one
+    /// picker -- and unlike the other two, a second would not merely be confusing: both would
+    /// be asking the same person about the same filesystem with only one answer to give.
+    pub chooser: Option<crate::filechooser::Chooser>,
+    /// The `FileChooser` call that dialog is answering.
+    choosing: Option<Choosing>,
     /// Bumped per screenshot, so two from one portal do not land on the same filename.
     shots_taken: u64,
     /// The file the last screenshot went to, kept so it can be taken away again.
@@ -113,6 +122,21 @@ struct Shooting {
     /// Where the tool was told to write, so the answer can be checked against it -- the tool
     /// is a separate process and its answer is untrusted input, exactly as the picker's is.
     path: std::path::PathBuf,
+}
+
+/// A `FileChooser` call waiting on the picker.
+struct Choosing {
+    reply: Reply<ChooserResult>,
+    /// Which of the three calls it was, so the answer is built the way that call's results are
+    /// described -- `writable` belongs to `OpenFile` alone.
+    mode: crate::filechooser::Mode,
+    /// Exactly what was offered, so the answer's `current_filter` index can be turned back into
+    /// the filter the application sent. The picker is a separate process and its answer is
+    /// untrusted input, the same rule the screenshot tool's answered path is held to.
+    filters: Vec<crate::dbus::FilterTuple>,
+    /// How many files `SaveFiles` asked for. A `SaveFiles` answer must have exactly this many,
+    /// in order, because the application matches them to its own list by position.
+    expected: Option<usize>,
 }
 
 /// The question a running picker was asked.
@@ -461,6 +485,14 @@ impl Portal {
                 options,
                 reply,
             } => self.screenshot(request, app_id, options, reply),
+            Request::FileChooser {
+                request,
+                app_id,
+                title,
+                mode,
+                options,
+                reply,
+            } => self.file_chooser(request, app_id, title, mode, options, reply),
             Request::Cancel { request } => self.cancel(request),
             Request::CloseSession { session } => self.close_session(session),
         }
@@ -1018,6 +1050,216 @@ impl Portal {
         }
     }
 
+    /// `FileChooser`: put a file dialog up and answer with what the user chose.
+    ///
+    /// The same shape as [`Portal::screenshot`] and for the same reasons: a helper does the
+    /// work, there is no session because the call is over when the user answers, and the helper
+    /// is watched on the loop rather than waited on so `Request.Close` stays answerable.
+    fn file_chooser(
+        &mut self,
+        request: OwnedObjectPath,
+        app_id: String,
+        title: String,
+        mode: crate::filechooser::Mode,
+        options: ChooserOptions,
+        reply: Reply<ChooserResult>,
+    ) {
+        // One at a time. Two file dialogs would be two questions to one person about one
+        // filesystem, and only the top one could be answered.
+        if self.chooser.is_some() {
+            tracing::warn!("a file dialog is already open; refusing a second");
+            reply.fail(PortalResponse::Ended);
+            return;
+        }
+
+        let filters = options.filters.clone();
+        let expected = (mode == crate::filechooser::Mode::SaveFiles).then_some(options.files.len());
+
+        let manifest = crate::filechooser::Manifest {
+            mode,
+            app_id,
+            title,
+            accept_label: options.accept_label,
+            multiple: options.multiple,
+            directory: options.directory,
+            current_name: options.current_name,
+            current_folder: options.current_folder,
+            current_file: options.current_file,
+            files: options.files,
+            filters: filters
+                .iter()
+                .map(|(name, rules)| crate::filechooser::Filter {
+                    name: name.clone(),
+                    rules: rules
+                        .iter()
+                        // The interface's discriminator: 0 is a glob, 1 is a MIME type.
+                        // Anything else is a frontend speaking a revision this does not know,
+                        // and reading it as a glob is the harmless half -- a pattern that
+                        // matches nothing shows an empty list, where a MIME rule that matched
+                        // everything would show files the application asked to hide.
+                        .map(|(kind, pattern)| crate::filechooser::Rule {
+                            mime: *kind == 1,
+                            pattern: pattern.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            current_filter: options.current_filter,
+            choices: options
+                .choices
+                .iter()
+                .map(|(id, label, choices, default)| crate::filechooser::Choice {
+                    id: id.clone(),
+                    label: label.clone(),
+                    options: choices
+                        .iter()
+                        .map(|(id, label)| crate::filechooser::ChoiceOption {
+                            id: id.clone(),
+                            label: label.clone(),
+                        })
+                        .collect(),
+                    default: default.clone(),
+                })
+                .collect(),
+        };
+
+        let mut chooser = match crate::filechooser::Chooser::spawn(&manifest, request) {
+            Ok(chooser) => chooser,
+            Err(err) => {
+                tracing::error!("{err}");
+                reply.fail(PortalResponse::Ended);
+                return;
+            }
+        };
+        if let Err(err) = self.watch_chooser(&mut chooser) {
+            tracing::error!("{err}");
+            chooser.cancel();
+            reply.fail(PortalResponse::Ended);
+            return;
+        }
+
+        self.chooser = Some(chooser);
+        self.choosing = Some(Choosing {
+            reply,
+            mode,
+            filters,
+            expected,
+        });
+    }
+
+    /// Watch the picker's stdout, so its answer arrives as an event like anything else.
+    fn watch_chooser(&mut self, chooser: &mut crate::filechooser::Chooser) -> Result<(), String> {
+        let handle = self
+            .handle
+            .clone()
+            .ok_or("no event loop to watch the file picker")?;
+        let stdout = chooser
+            .take_stdout()
+            .ok_or("the file picker has no stdout")?;
+        let flags = rustix::fs::fcntl_getfl(&stdout)
+            .map_err(|err| format!("could not read the picker's stdout flags: {err}"))?;
+        rustix::fs::fcntl_setfl(&stdout, flags | rustix::fs::OFlags::NONBLOCK)
+            .map_err(|err| format!("could not make the picker's stdout non-blocking: {err}"))?;
+
+        handle
+            .insert_source(
+                calloop::generic::Generic::new(
+                    stdout,
+                    calloop::Interest::READ,
+                    calloop::Mode::Level,
+                ),
+                |_, stdout, portal: &mut Portal| {
+                    let Some(chooser) = &mut portal.chooser else {
+                        return Ok(calloop::PostAction::Remove);
+                    };
+                    if !chooser.read_available(&**stdout) {
+                        return Ok(calloop::PostAction::Continue);
+                    }
+                    // stdout closed: the picker is done talking.
+                    if let Some(chooser) = portal.chooser.take() {
+                        portal.chooser_finished(chooser.finish());
+                    }
+                    Ok(calloop::PostAction::Remove)
+                },
+            )
+            .map_err(|err| format!("could not watch the file picker: {err}"))?;
+        Ok(())
+    }
+
+    /// Answer the `FileChooser` call with what the user chose.
+    fn chooser_finished(&mut self, outcome: crate::filechooser::Outcome) {
+        let Some(choosing) = self.choosing.take() else {
+            return;
+        };
+
+        let answer = match outcome {
+            crate::filechooser::Outcome::Chosen(answer) => answer,
+            crate::filechooser::Outcome::Canceled => {
+                tracing::info!("the file dialog was canceled");
+                choosing.reply.fail(PortalResponse::Canceled);
+                return;
+            }
+            crate::filechooser::Outcome::Failed(err) => {
+                tracing::error!("{err}");
+                choosing.reply.fail(PortalResponse::Ended);
+                return;
+            }
+        };
+
+        // The picker is a separate process and its answer is input like any other -- the same
+        // rule the screenshot tool's answered path is held to. The interface requires every URI
+        // to be a local `file://` one, and the whole answer is refused rather than filtered: a
+        // shorter list than the user chose is an application silently attaching three files out
+        // of four, which is worse than a failure they can see.
+        if let Some(bad) = answer
+            .uris
+            .iter()
+            .find(|uri| !crate::filechooser::is_acceptable(uri))
+        {
+            tracing::warn!(uri = %bad, "the file picker answered with a URI that is not a local file; refusing it");
+            choosing.reply.fail(PortalResponse::Ended);
+            return;
+        }
+
+        // `SaveFiles` answers one URI per name it was given, in the order it was given them,
+        // because the application matches the two lists up by position. A short or long answer
+        // would silently shift every file after the mismatch onto the wrong name.
+        if let Some(expected) = choosing.expected
+            && answer.uris.len() != expected
+        {
+            tracing::warn!(
+                expected,
+                answered = answer.uris.len(),
+                "the file picker answered SaveFiles with the wrong number of files; refusing it",
+            );
+            choosing.reply.fail(PortalResponse::Ended);
+            return;
+        }
+
+        // Back from an index into what was sent to the filter itself, which is the shape the
+        // application gets its answer in.
+        let current_filter = usize::try_from(answer.current_filter)
+            .ok()
+            .and_then(|index| choosing.filters.get(index))
+            .cloned();
+
+        tracing::info!(files = answer.uris.len(), "the user chose");
+        choosing.reply.send(
+            PortalResponse::Success,
+            ChooserResult {
+                uris: answer.uris,
+                choices: answer
+                    .choices
+                    .into_iter()
+                    .map(|choice| (choice.id, choice.value))
+                    .collect(),
+                current_filter,
+                // A save is writable by definition; an open is only if the picker said so.
+                writable: answer.writable || choosing.mode != crate::filechooser::Mode::Open,
+            },
+        );
+    }
+
     /// `Request.Close`: the application gave up while the picker was up.
     fn cancel(&mut self, request: OwnedObjectPath) {
         // Take the dialog off the screen. Leaving it up would ask the user to choose a source
@@ -1033,6 +1275,13 @@ impl Portal {
             && shot.request == request
         {
             shot.cancel();
+        }
+        // And the file dialog, which would otherwise ask the user to choose a file for an
+        // upload that has already been abandoned.
+        if let Some(chooser) = &mut self.chooser
+            && chooser.request == request
+        {
+            chooser.cancel();
         }
 
         let pending = self
@@ -1062,6 +1311,10 @@ impl Portal {
         // child dies cleanly.
         if let Some(shooting) = self.shooting.take() {
             shooting.reply.fail(PortalResponse::Canceled);
+        }
+        // Likewise a file dialog, which has no session either.
+        if let Some(choosing) = self.choosing.take() {
+            choosing.reply.fail(PortalResponse::Canceled);
         }
     }
 
