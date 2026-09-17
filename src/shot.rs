@@ -156,6 +156,13 @@ impl Shot {
             None => return Outcome::Canceled,
         }
 
+        // Exit 0 with nothing said is a cancel, not a broken tool -- the same rule the other
+        // two helpers are read by. A tool that answered from a toolkit shutdown path would
+        // otherwise report a failure for a shot the user simply dismissed.
+        if self.output.iter().all(u8::is_ascii_whitespace) {
+            return Outcome::Canceled;
+        }
+
         match serde_json::from_slice::<Answer>(&self.output) {
             Ok(answer) => Outcome::Taken(answer),
             Err(err) => Outcome::Failed(format!("could not read the answer from {TOOL}: {err}")),
@@ -249,6 +256,12 @@ mod tests {
             file_uri(std::path::Path::new("/tmp/画")),
             "file:///tmp/%E7%94%BB"
         );
+    }
+
+    /// A tool that exited 0 and said nothing has canceled, not crashed.
+    #[test]
+    fn silence_is_a_cancel_rather_than_a_failure() {
+        assert!(serde_json::from_slice::<Answer>(b"").is_err());
     }
 
     #[test]

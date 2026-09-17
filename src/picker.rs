@@ -182,6 +182,15 @@ impl Picker {
             None => return Outcome::Canceled,
         }
 
+        // Exit 0 with nothing said is a cancel, not a broken picker. It is what an answer
+        // written from a toolkit shutdown path looks like when the shutdown gets there first --
+        // which is exactly what wlrix-source-picker did until 2026-09-17, so canceling a screen
+        // share reported a failure to the application instead of a cancel. Fixed on that side
+        // too; this is the half that does not depend on which build of the picker is installed.
+        if self.output.iter().all(u8::is_ascii_whitespace) {
+            return Outcome::Canceled;
+        }
+
         match serde_json::from_slice::<Selection>(&self.output) {
             // Success with an empty list is not a selection. Treated as a cancel rather than an
             // error: the user ended up sharing nothing, which is what canceling means, and an
@@ -208,5 +217,33 @@ impl Drop for Picker {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A picker that exited 0 and said nothing has canceled, not crashed.
+    ///
+    /// The parse is what would otherwise decide, and it says "failed" -- which reached the
+    /// application as an error dialog for a share they simply declined.
+    #[test]
+    fn silence_is_a_cancel_rather_than_a_failure() {
+        assert!(serde_json::from_slice::<Selection>(b"").is_err());
+    }
+
+    /// Success with an empty list is a cancel too, and that rule predates the one above.
+    #[test]
+    fn an_empty_selection_parses_but_means_nothing_chosen() {
+        let selection: Selection = serde_json::from_str(r#"{"sources":[]}"#).unwrap();
+        assert!(selection.sources.is_empty());
+    }
+
+    #[test]
+    fn an_answer_parses() {
+        let selection: Selection =
+            serde_json::from_str(r#"{"sources":["monitor:winit","window:1"]}"#).unwrap();
+        assert_eq!(selection.sources, ["monitor:winit", "window:1"]);
     }
 }

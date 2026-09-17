@@ -152,8 +152,10 @@ the source.
 ```
 
 **Exit code** — `0` accepted, `1` canceled, anything else failed. Both signals are checked: a picker that dies
-mid-answer produces neither valid stdout nor a zero exit. An empty `sources` with exit 0 counts as canceled. Ids not in
-the manifest are discarded, and more ids than `multiple` allows are truncated.
+mid-answer produces neither valid stdout nor a zero exit. An empty `sources` with exit 0 counts as canceled, and so
+does **no output at all** — that is what an answer written from a toolkit shutdown path looks like when the shutdown
+gets there first, which `wlrix-source-picker` did until 2026-09-17, so declining to share showed the application a
+failure instead of a cancel. Ids not in the manifest are discarded, and more ids than `multiple` allows are truncated.
 
 stderr is the picker's log and joins this program's in the journal.
 
@@ -212,7 +214,10 @@ the tool ORs it with its own `screenshot.toml` rather than giving the same setti
 }
 ```
 
-**Exit code** — `0` taken, `1` canceled, anything else failed. Both are checked, as with the picker.
+**Exit code** — `0` taken, `1` canceled, anything else failed. Both are checked, as with the picker. Exit 0 with
+nothing on stdout is read as a **cancel** rather than a failure, which is the rule all three helper contracts share: it
+is what an answer written from a toolkit shutdown path looks like when the shutdown gets there first, and the difference
+to the user is an error dialog for something they simply dismissed.
 
 **This backend names the file, and the answer may only confirm it.** A tool answering with a different path is refused
 rather than passed on: the helper is a separate process and its answer is input, and a URI for a file this backend never
@@ -276,7 +281,7 @@ interface's own rule, not a convention invented here.
 ```
 
 **Exit code** — `0` accepted, `1` canceled, anything else failed. Both are checked, as with the other two helpers, and
-an accepted answer with an empty `uris` is read as a cancel: the user ended up choosing nothing, which is what
+an accepted answer with an empty `uris` — or no output at all — is read as a cancel: the user ended up choosing nothing, which is what
 canceling means, and an application should not be shown a failure for it.
 
 **The answer is input, and is checked.** Every URI must be `file:///…` — the interface requires it — and a `save_files`
