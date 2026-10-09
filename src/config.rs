@@ -43,6 +43,27 @@ pub struct Appearance {
     /// [`wlrix_ui::palette::resolve`] answers. A mistyped scheme name must not stop a toolkit
     /// being told anything at all.
     pub palette: Option<String>,
+    /// The icon theme a toolkit is told to use, as `org.gnome.desktop.interface` `icon-theme`.
+    ///
+    /// Absent means [`DEFAULT_ICON_THEME`], the IRIX set `wlrix-assets` installs, so a GTK
+    /// application draws the same folders and file types as wlRIX Files. Empty means this
+    /// backend does not answer for it, and the next backend's answer -- GNOME's gsettings,
+    /// through `xdg-desktop-portal-gtk` -- is what a toolkit gets.
+    pub icon_theme: Option<String>,
+}
+
+/// What [`Appearance::icon_theme`] means when the file does not say.
+pub const DEFAULT_ICON_THEME: &str = "wlrix";
+
+impl Appearance {
+    /// The icon theme to report, or `None` to leave it to the next backend.
+    pub fn icon_theme(&self) -> Option<&str> {
+        match self.icon_theme.as_deref() {
+            None => Some(DEFAULT_ICON_THEME),
+            Some("") => None,
+            Some(theme) => Some(theme),
+        }
+    }
 }
 
 /// How frames are got out of the compositor.

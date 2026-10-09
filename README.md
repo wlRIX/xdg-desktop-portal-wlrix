@@ -300,6 +300,7 @@ anywhere else at all.
 | `org.freedesktop.appearance` | `color-scheme` | 1 for a dark scheme, 2 for a light one |
 | `org.freedesktop.appearance` | `accent-color` | the palette's accent, as `(ddd)` |
 | `org.freedesktop.appearance` | `contrast` | 0 — IRIX schemes are not contrast variants |
+| `org.gnome.desktop.interface` | `icon-theme` | `wlrix`, while it is installed |
 
 **The button layout has no other route.** On Wayland GTK reads `gtk-decoration-layout` from this interface and ignores
 `settings.ini` for it; without a backend it keeps its own compiled `menu:close`. Measured both ways. The layout reported
@@ -314,17 +315,28 @@ Two asymmetries worth knowing, both verified against a live GTK:
 - **GTK will not draw the menu button.** GTK 3 draws one only for an application that has an app menu; GTK 4 leaves the
   leading `windowcontrols` empty. It is asked for anyway — it costs nothing and it says what the layout means.
 
-Everything this backend does not own answers `NotFound`, deliberately. Claiming an interface in `wlrix-portals.conf`
-takes the *whole* interface, so a key invented here is a key the user can no longer set: the font and the cursor theme
-are the ones that would hurt, and both are left alone.
+Everything this backend does not own answers `NotFound`, and that **falls through to the next backend rather than
+stopping**. xdg-desktop-portal merges Settings across every backend it would use, in preference order, so a key answered
+here wins and any other key is asked of `xdg-desktop-portal-gtk`, which serves GNOME's gsettings. Measured on
+xdg-desktop-portal 1.22: `button-layout` read back as this backend's value while gsettings said `appmenu:close`, and
+`icon-theme` read back as gsettings' `Adwaita` while this backend did not serve it.
+
+So a key answered here overrides both `settings.ini` and gsettings, and only what wlRIX owns is answered: the font and
+the cursor theme are left alone. **The icon theme is answered** because leaving it alone does not leave it to
+`settings.ini` — gsettings answers first, and a GTK application drew Adwaita's folders next to wlRIX Files' IRIX ones.
+It is reported only while that theme is actually installed, since GTK told to use a missing theme loses Adwaita's icons
+for hicolor's.
 
 The scheme comes from `[appearance] palette` in `portal.toml`, which `wlrix-settings-daemon` writes alongside the four
 components that draw. It is re-read on every call, so an application started after a change is told the new scheme with
 nothing having to signal this process.
 
-`SettingChanged` is declared and never emitted, which is a decision rather than an omission — see the note at the top of
-`src/dbus/settings.rs`. The short version: the colors reach GTK through `gtk.css`, GTK does not reload that file, and
-flipping only the dark hint would repaint half a window.
+`SettingChanged` is emitted on `SIGHUP`, which `wlrix-settings-daemon` sends after writing `portal.toml`. The file is
+re-read and only the keys whose value actually moved are announced — the button layout is the same under every scheme,
+so a scheme change announces the colors and not the layout. This is how an application that is already running learns
+of a change: a toolkit reads these settings once, at startup. Chromium, Electron and Qt have no other source. GTK lags
+in one respect: it flips its dark hint, but the colors it took from `gtk.css` stay put until it is restarted, because
+GTK does not reload that file. See the note at the top of `src/dbus/settings.rs`.
 
 ## Configuration
 
@@ -340,12 +352,14 @@ tile = [320, 180] # thumbnail size
 dmabuf = false    # offer GPU memory as well as shared memory — see below
 
 [appearance]
-palette = "gotham" # the session's color scheme, for what Settings reports
+palette = "gotham"   # the session's color scheme, for what Settings reports
+icon_theme = "wlrix" # the icon theme Settings reports; "" leaves it to the next backend
 ```
 
 `[appearance] palette` is not tuning and is not normally hand-edited: `wlrix-settings-daemon` writes it from
 `appearance.palette` along with the compositor's, the desktop's, the tray's and the screenshot tool's, so a GTK
-application is told the same scheme the chrome around it is drawn in.
+application is told the same scheme the chrome around it is drawn in. `[appearance] icon_theme` is a settings-daemon key
+of its own, `portal.appearance.icon_theme`.
 
 `capture.dmabuf` is safe to switch on: the stream offers shared memory alongside the dmabuf, so a consumer that cannot
 import one falls back instead of failing. That is verified — GStreamer declines the dmabuf and streams over shm without

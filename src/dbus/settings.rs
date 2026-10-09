@@ -28,13 +28,25 @@
 //! - `org.freedesktop.appearance` `color-scheme`, `accent-color` and `contrast` -- from the
 //!   session's palette, so a libadwaita application picks the same light or dark as the chrome
 //!   around it.
+//! - `org.gnome.desktop.interface` `icon-theme` -- `wlrix` unless `portal.toml` says otherwise,
+//!   so a GTK application draws the same folders and file types as wlRIX Files. Only while that
+//!   theme is installed: GTK told to use a missing theme loses Adwaita's icons for hicolor's,
+//!   which is worse than not being told at all.
 //!
-//! Everything else answers `NotFound`, which is not a gap but the point. Claiming an interface
-//! in `wlrix-portals.conf` takes the *whole* interface from the fallback backend, so this one is
-//! now the only thing a toolkit asks -- and a key it invents an answer for is a key the user can
-//! no longer set. `font-name` and the cursor settings are the ones that matter: the cursor is
-//! already handed to clients through the session's environment, and the font is the user's.
-//! Answering `NotFound` leaves both where they were.
+//! Everything else answers `NotFound`, and that **falls through rather than stopping**.
+//! xdg-desktop-portal merges Settings across every backend it would use, in preference order:
+//! a key this backend answers wins, and a key it does not is asked of the next one --
+//! `xdg-desktop-portal-gtk`, under `default=gtk`, which serves GNOME's gsettings. Measured on
+//! xdg-desktop-portal 1.22: `button-layout` read back as this backend's
+//! `menu:minimize,maximize` while gsettings said `appmenu:close`, and `icon-theme` read back as
+//! gsettings' `Adwaita` while this backend did not serve it.
+//!
+//! Two things follow. A key answered here overrides `settings.ini` *and* gsettings, so only
+//! what wlRIX owns is answered -- `font-name` and the cursor settings are left alone, the cursor
+//! because it already reaches clients through the session's environment and the font because
+//! it is the user's. And a key *not* answered here does not reach `settings.ini` either: the
+//! GTK backend answers it from gsettings first, which is why `icon-theme` has to be served
+//! here rather than written to `settings.ini` and left to GTK.
 //!
 //! ## `SettingChanged`, and the reasoning that got it wrong once
 //!
@@ -78,6 +90,8 @@ use crate::config::Config;
 const WM_PREFERENCES: &str = "org.gnome.desktop.wm.preferences";
 /// The cross-desktop appearance namespace: light or dark, and the accent color.
 const APPEARANCE: &str = "org.freedesktop.appearance";
+/// The namespace a toolkit reads its icon theme from.
+const INTERFACE_PREFERENCES: &str = "org.gnome.desktop.interface";
 
 /// Where IRIX put the window buttons.
 ///
@@ -182,6 +196,15 @@ fn current() -> Vec<(&'static str, &'static str, OwnedValue)> {
 
 /// Split from [`current`] so the table can be tested without a config file on disk.
 fn settings_for(config: &Config) -> Vec<(&'static str, &'static str, OwnedValue)> {
+    settings_with(config, icon_theme_installed)
+}
+
+/// [`settings_for`], with what counts as an installed icon theme handed in -- so the table can be
+/// tested without depending on what this machine has under `share/icons`.
+fn settings_with(
+    config: &Config,
+    installed: impl Fn(&str) -> bool,
+) -> Vec<(&'static str, &'static str, OwnedValue)> {
     let (palette, unknown) = wlrix_ui::palette::resolve(config.appearance.palette.as_deref());
     if let Some(why) = unknown {
         tracing::warn!("{why}; reporting {}", palette.id);
@@ -194,7 +217,7 @@ fn settings_for(config: &Config) -> Vec<(&'static str, &'static str, OwnedValue)
         f64::from(b) / 255.0,
     );
 
-    vec![
+    let mut settings = vec![
         (WM_PREFERENCES, "button-layout", variant(BUTTON_LAYOUT)),
         // 1 is "prefer dark", 2 is "prefer light". Never 0: wlRIX always has a scheme, and "no
         // preference" would leave a toolkit to guess at something this session knows.
@@ -207,7 +230,38 @@ fn settings_for(config: &Config) -> Vec<(&'static str, &'static str, OwnedValue)
         // 0 is normal contrast. IRIX schemes are not high-contrast variants of each other --
         // Gotham is a dark scheme, not an accessibility one.
         (APPEARANCE, "contrast", variant(0u32)),
-    ]
+    ];
+
+    match config.appearance.icon_theme() {
+        Some(theme) if installed(theme) => {
+            settings.push((
+                INTERFACE_PREFERENCES,
+                "icon-theme",
+                variant(theme.to_owned()),
+            ));
+        }
+        Some(theme) => {
+            tracing::debug!("icon theme {theme:?} is not installed; leaving icon-theme unanswered");
+        }
+        None => {}
+    }
+    settings
+}
+
+/// Whether an icon theme named `theme` is on the XDG data directories, where GTK would look.
+fn icon_theme_installed(theme: &str) -> bool {
+    let home = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))
+        });
+    let system = std::env::var_os("XDG_DATA_DIRS")
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    home.into_iter()
+        .chain(std::env::split_paths(&system))
+        .any(|dir| dir.join("icons").join(theme).join("index.theme").is_file())
 }
 
 /// One value, wrapped for the wire.
@@ -271,6 +325,7 @@ mod tests {
         Config {
             appearance: crate::config::Appearance {
                 palette: palette.map(ToOwned::to_owned),
+                icon_theme: None,
             },
             ..Default::default()
         }
@@ -354,22 +409,54 @@ mod tests {
 
     #[test]
     fn nothing_else_is_answered_for() {
-        // Claiming this interface takes the whole of it from the fallback backend, so a key
-        // invented here is a key the user can no longer set in settings.ini. The font and the
-        // cursor are the ones that would hurt.
-        let all = settings_for(&config(None));
+        // A key answered here overrides the user's own settings.ini and gsettings, so a key
+        // invented here is a key the user can no longer set. The font and the cursor are the
+        // ones that would hurt.
+        let all = settings_with(&config(None), |_| true);
         for (namespace, key) in [
             ("org.gnome.desktop.interface", "font-name"),
             ("org.gnome.desktop.interface", "cursor-theme"),
             ("org.gnome.desktop.interface", "cursor-size"),
             ("org.gnome.desktop.interface", "gtk-theme"),
-            ("org.gnome.desktop.interface", "icon-theme"),
         ] {
             assert!(
                 !all.iter().any(|(ns, k, _)| *ns == namespace && *k == key),
                 "{namespace} {key} is answered for and should not be"
             );
         }
+    }
+
+    fn icon_theme(config: &Config, installed: bool) -> Option<String> {
+        settings_with(config, |_| installed)
+            .into_iter()
+            .find(|(ns, k, _)| *ns == INTERFACE_PREFERENCES && *k == "icon-theme")
+            .map(|(_, _, value)| String::try_from(value).unwrap())
+    }
+
+    #[test]
+    fn the_icon_theme_is_wlrix_by_default() {
+        // Unanswered, it falls through to xdg-desktop-portal-gtk and gsettings' Adwaita, and a
+        // GTK application draws different folders from the file manager beside it.
+        assert_eq!(icon_theme(&config(None), true).as_deref(), Some("wlrix"));
+    }
+
+    #[test]
+    fn a_named_icon_theme_is_reported_and_an_empty_one_is_not() {
+        let mut named = config(None);
+        named.appearance.icon_theme = Some("Papirus".to_owned());
+        assert_eq!(icon_theme(&named, true).as_deref(), Some("Papirus"));
+
+        // Empty hands the key back to the next backend, which is how a user who would rather
+        // set it through gsettings gets to.
+        let mut off = config(None);
+        off.appearance.icon_theme = Some(String::new());
+        assert_eq!(icon_theme(&off, true), None);
+    }
+
+    #[test]
+    fn a_missing_icon_theme_is_not_reported() {
+        // GTK told to use a theme that is not there loses Adwaita's icons for hicolor's.
+        assert_eq!(icon_theme(&config(None), false), None);
     }
 
     #[test]
@@ -460,17 +547,18 @@ mod tests {
 
     #[test]
     fn read_all_groups_by_namespace() {
-        let settings = settings_for(&config(Some("gotham")));
-        let mut appearance = 0;
-        let mut wm = 0;
+        let settings = settings_with(&config(Some("gotham")), |_| true);
+        let (mut appearance, mut wm, mut interface) = (0, 0, 0);
         for (namespace, _, _) in &settings {
             match *namespace {
                 APPEARANCE => appearance += 1,
                 WM_PREFERENCES => wm += 1,
+                INTERFACE_PREFERENCES => interface += 1,
                 other => panic!("unexpected namespace {other}"),
             }
         }
         assert_eq!(wm, 1);
         assert_eq!(appearance, 3, "color-scheme, accent-color and contrast");
+        assert_eq!(interface, 1, "icon-theme");
     }
 }
