@@ -32,6 +32,11 @@
 //!   so a GTK application draws the same folders and file types as wlRIX Files. Only while that
 //!   theme is installed: GTK told to use a missing theme loses Adwaita's icons for hicolor's,
 //!   which is worse than not being told at all.
+//! - `org.gnome.desktop.sound` `theme-name` and `event-sounds` -- from `sounds.toml`, so a GTK
+//!   application's own event sounds (libcanberra's) come from the theme the desktop's do, and
+//!   stop when the desktop's are switched off. Answered whether or not the theme is installed:
+//!   a sound theme falls back to `freedesktop` by itself, sound by sound, so naming a missing one
+//!   costs nothing.
 //!
 //! Everything else answers `NotFound`, and that **falls through rather than stopping**.
 //! xdg-desktop-portal merges Settings across every backend it would use, in preference order:
@@ -92,6 +97,8 @@ const WM_PREFERENCES: &str = "org.gnome.desktop.wm.preferences";
 const APPEARANCE: &str = "org.freedesktop.appearance";
 /// The namespace a toolkit reads its icon theme from.
 const INTERFACE_PREFERENCES: &str = "org.gnome.desktop.interface";
+/// The namespace a toolkit reads its event sound settings from.
+const SOUND: &str = "org.gnome.desktop.sound";
 
 /// Where IRIX put the window buttons.
 ///
@@ -230,6 +237,8 @@ fn settings_with(
         // 0 is normal contrast. IRIX schemes are not high-contrast variants of each other --
         // Gotham is a dark scheme, not an accessibility one.
         (APPEARANCE, "contrast", variant(0u32)),
+        (SOUND, "theme-name", variant(config.sounds.theme.clone())),
+        (SOUND, "event-sounds", variant(config.sounds.enabled)),
     ];
 
     match config.appearance.icon_theme() {
@@ -359,6 +368,24 @@ mod tests {
                 "{scheme:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_sound_settings_come_from_sounds_toml() {
+        let mut config = config(None);
+        let theme = read(&config, SOUND, "theme-name").expect("served");
+        assert_eq!(String::try_from(theme).unwrap(), "wlrix");
+        let on = read(&config, SOUND, "event-sounds").expect("served");
+        assert!(bool::try_from(on).unwrap());
+
+        config.sounds = crate::config::Sounds {
+            enabled: false,
+            theme: "freedesktop".to_owned(),
+        };
+        let theme = read(&config, SOUND, "theme-name").expect("served");
+        assert_eq!(String::try_from(theme).unwrap(), "freedesktop");
+        let off = read(&config, SOUND, "event-sounds").expect("served");
+        assert!(!bool::try_from(off).unwrap());
     }
 
     #[test]
@@ -548,17 +575,19 @@ mod tests {
     #[test]
     fn read_all_groups_by_namespace() {
         let settings = settings_with(&config(Some("gotham")), |_| true);
-        let (mut appearance, mut wm, mut interface) = (0, 0, 0);
+        let (mut appearance, mut wm, mut interface, mut sound) = (0, 0, 0, 0);
         for (namespace, _, _) in &settings {
             match *namespace {
                 APPEARANCE => appearance += 1,
                 WM_PREFERENCES => wm += 1,
                 INTERFACE_PREFERENCES => interface += 1,
+                SOUND => sound += 1,
                 other => panic!("unexpected namespace {other}"),
             }
         }
         assert_eq!(wm, 1);
         assert_eq!(appearance, 3, "color-scheme, accent-color and contrast");
         assert_eq!(interface, 1, "icon-theme");
+        assert_eq!(sound, 2, "theme-name and event-sounds");
     }
 }

@@ -301,6 +301,12 @@ anywhere else at all.
 | `org.freedesktop.appearance` | `accent-color` | the palette's accent, as `(ddd)` |
 | `org.freedesktop.appearance` | `contrast` | 0 — IRIX schemes are not contrast variants |
 | `org.gnome.desktop.interface` | `icon-theme` | `wlrix`, while it is installed |
+| `org.gnome.desktop.sound` | `theme-name` | `sounds.toml`'s `theme`, `wlrix` by default |
+| `org.gnome.desktop.sound` | `event-sounds` | `sounds.toml`'s `enabled` |
+
+**The sound keys come from `sounds.toml`, not `portal.toml`.** That file belongs to `wlrix-sound`, and this backend only
+reads it, so a GTK application's own event sounds come from the theme the desktop's do. `wlrix-settings-daemon` signals
+this backend as well as the sound daemon when either key changes, so running applications get `SettingChanged`.
 
 **The button layout has no other route.** On Wayland GTK reads `gtk-decoration-layout` from this interface and ignores
 `settings.ini` for it; without a backend it keeps its own compiled `menu:close`. Measured both ways. The layout reported

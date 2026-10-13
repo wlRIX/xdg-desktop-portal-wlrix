@@ -24,6 +24,10 @@ pub struct Config {
     pub preview: Preview,
     pub capture: Capture,
     pub appearance: Appearance,
+    /// Not from `portal.toml`: the desktop's sound settings, read from `sounds.toml` beside it.
+    /// See [`Sounds`].
+    #[serde(skip)]
+    pub sounds: Sounds,
 }
 
 /// What this backend reports through `org.freedesktop.impl.portal.Settings`.
@@ -62,6 +66,74 @@ impl Appearance {
             None => Some(DEFAULT_ICON_THEME),
             Some("") => None,
             Some(theme) => Some(theme),
+        }
+    }
+}
+
+/// The desktop's sound theme and whether event sounds play, for
+/// `org.gnome.desktop.sound` `theme-name` and `event-sounds`.
+///
+/// Read from `sounds.toml`, which belongs to `wlrix-sound` -- the settings are the sound
+/// daemon's, and a second copy of them in `portal.toml` would be two places to change one thing.
+/// This backend only reads the file, so it parses it leniently: `wlrix-sound` is the one that
+/// validates it, and a key this backend does not know about is not this backend's business.
+/// `wlrix-settings-daemon` sends `SIGHUP` here as well as to `wlrix-sound` when either key moves,
+/// so running applications are told.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sounds {
+    pub enabled: bool,
+    pub theme: String,
+}
+
+/// What `theme` means when `sounds.toml` does not say: the IRIX set `wlrix-sounds` installs.
+/// The same default `wlrix-sound` has, kept in step by hand.
+pub const DEFAULT_SOUND_THEME: &str = "wlrix";
+
+impl Default for Sounds {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            theme: DEFAULT_SOUND_THEME.to_owned(),
+        }
+    }
+}
+
+/// `sounds.toml` as this backend reads it. No `deny_unknown_fields`, on purpose -- see
+/// [`Sounds`].
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct SoundsFile {
+    enabled: Option<bool>,
+    theme: Option<String>,
+}
+
+impl Sounds {
+    /// Read `sounds.toml` -- the user's, else the system's -- or the defaults.
+    pub fn load() -> Self {
+        let Some(path) = config_path("sounds.toml") else {
+            return Self::default();
+        };
+        match std::fs::read_to_string(&path)
+            .map_err(|err| err.to_string())
+            .and_then(|text| toml::from_str::<SoundsFile>(&text).map_err(|err| err.to_string()))
+        {
+            Ok(file) => Self::from_file(file),
+            Err(err) => {
+                tracing::warn!("could not read {}: {err}; using defaults", path.display());
+                Self::default()
+            }
+        }
+    }
+
+    fn from_file(file: SoundsFile) -> Self {
+        let default = Self::default();
+        Self {
+            enabled: file.enabled.unwrap_or(default.enabled),
+            // Empty means the default theme, as it does to `wlrix-sound`.
+            theme: file
+                .theme
+                .filter(|theme| !theme.is_empty())
+                .unwrap_or(default.theme),
         }
     }
 }
@@ -147,7 +219,14 @@ impl Config {
     /// share fail with nothing on screen to explain why, and the only thing in the file is how
     /// fast thumbnails refresh.
     pub fn load() -> Self {
-        let Some(path) = Self::path() else {
+        let mut config = Self::load_file();
+        config.sounds = Sounds::load();
+        config
+    }
+
+    /// `portal.toml` alone.
+    fn load_file() -> Self {
+        let Some(path) = config_path("portal.toml") else {
             return Self::default();
         };
         let text = match std::fs::read_to_string(&path) {
@@ -168,15 +247,39 @@ impl Config {
             }
         }
     }
+}
 
-    fn path() -> Option<PathBuf> {
-        let user = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|dir| dir.is_absolute())
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .map(|dir| dir.join("wlrix").join("portal.toml"));
+/// The first of the user's and the system's `wlrix/<name>` that exists.
+fn config_path(name: &str) -> Option<PathBuf> {
+    let user = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .map(|dir| dir.join("wlrix").join(name));
 
-        user.filter(|path| path.exists())
-            .or_else(|| Some(PathBuf::from("/etc/wlrix/portal.toml")).filter(|p| p.exists()))
+    user.filter(|path| path.exists())
+        .or_else(|| Some(PathBuf::from("/etc/wlrix").join(name)).filter(|p| p.exists()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sounds_toml_is_read_leniently() {
+        // `wlrix-sound` owns this file and validates it; a key it has and this backend does not
+        // know -- `disabled` -- must not cost a toolkit the theme.
+        let file: SoundsFile =
+            toml::from_str("enabled = false\ntheme = \"freedesktop\"\ndisabled = [\"bell\"]\n")
+                .expect("parses");
+        let sounds = Sounds::from_file(file);
+        assert!(!sounds.enabled);
+        assert_eq!(sounds.theme, "freedesktop");
+    }
+
+    #[test]
+    fn an_empty_sound_theme_is_the_default() {
+        let file: SoundsFile = toml::from_str("theme = \"\"\n").expect("parses");
+        assert_eq!(Sounds::from_file(file), Sounds::default());
     }
 }
