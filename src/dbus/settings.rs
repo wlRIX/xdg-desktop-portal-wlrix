@@ -36,6 +36,9 @@
 //!   `[cursor]`, so a toolkit draws its own pointer from the theme the compositor draws the
 //!   desktop's in. Only while that theme is installed, as with `icon-theme`. See below for why the
 //!   session's `XCURSOR_THEME` does not already cover this.
+//! - `org.gnome.desktop.peripherals.mouse` `double-click` -- from `compositor.toml`'s
+//!   `[mouse] double_click_ms`, so a GTK application's double click is as quick as the
+//!   compositor's own. Always answered, at the compositor's default when the file is silent.
 //! - `org.gnome.desktop.sound` `theme-name` and `event-sounds` -- from `sounds.toml`, so a GTK
 //!   application's own event sounds (libcanberra's) come from the theme the desktop's do, and
 //!   stop when the desktop's are switched off. Answered whether or not the theme is installed:
@@ -108,6 +111,8 @@ const WM_PREFERENCES: &str = "org.gnome.desktop.wm.preferences";
 const APPEARANCE: &str = "org.freedesktop.appearance";
 /// The namespace a toolkit reads its icon theme from.
 const INTERFACE_PREFERENCES: &str = "org.gnome.desktop.interface";
+/// The namespace a toolkit reads its double-click time from.
+const MOUSE: &str = "org.gnome.desktop.peripherals.mouse";
 /// The namespace a toolkit reads its event sound settings from.
 const SOUND: &str = "org.gnome.desktop.sound";
 
@@ -251,6 +256,14 @@ fn settings_with(
         (APPEARANCE, "contrast", variant(0u32)),
         (SOUND, "theme-name", variant(config.sounds.theme.clone())),
         (SOUND, "event-sounds", variant(config.sounds.enabled)),
+        // An `i` in GNOME's schema. Always answered: the compositor has a double-click time
+        // whether or not its file names one, and a toolkit left to gsettings' 400 would only
+        // agree with it by coincidence.
+        (
+            MOUSE,
+            "double-click",
+            variant(i32::try_from(config.mouse.double_click_ms).unwrap_or(i32::MAX)),
+        ),
     ];
 
     match config.appearance.icon_theme() {
@@ -540,6 +553,17 @@ mod tests {
     }
 
     #[test]
+    fn the_double_click_time_is_the_compositors() {
+        let mut config = config(None);
+        let default = read(&config, MOUSE, "double-click").expect("served");
+        assert_eq!(i32::try_from(default).unwrap(), 400);
+
+        config.mouse.double_click_ms = 250;
+        let set = read(&config, MOUSE, "double-click").expect("served");
+        assert_eq!(i32::try_from(set).unwrap(), 250);
+    }
+
+    #[test]
     fn the_cursor_is_the_compositors() {
         // Unanswered, it falls through to xdg-desktop-portal-gtk and gsettings' Adwaita, and a
         // GTK application draws a different pointer from the one over the rest of the desktop.
@@ -685,13 +709,14 @@ mod tests {
         let mut config = config(Some("gotham"));
         config.cursor = with_cursor(Some("sgi"), 32).cursor;
         let settings = settings_with(&config, |_| true, |_| true);
-        let (mut appearance, mut wm, mut interface, mut sound) = (0, 0, 0, 0);
+        let (mut appearance, mut wm, mut interface, mut sound, mut mouse) = (0, 0, 0, 0, 0);
         for (namespace, _, _) in &settings {
             match *namespace {
                 APPEARANCE => appearance += 1,
                 WM_PREFERENCES => wm += 1,
                 INTERFACE_PREFERENCES => interface += 1,
                 SOUND => sound += 1,
+                MOUSE => mouse += 1,
                 other => panic!("unexpected namespace {other}"),
             }
         }
@@ -699,5 +724,6 @@ mod tests {
         assert_eq!(appearance, 3, "color-scheme, accent-color and contrast");
         assert_eq!(interface, 3, "icon-theme, cursor-theme and cursor-size");
         assert_eq!(sound, 2, "theme-name and event-sounds");
+        assert_eq!(mouse, 1, "double-click");
     }
 }

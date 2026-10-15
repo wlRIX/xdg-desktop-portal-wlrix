@@ -303,6 +303,7 @@ anywhere else at all.
 | `org.gnome.desktop.interface` | `icon-theme` | `wlrix`, while it is installed |
 | `org.gnome.desktop.interface` | `cursor-theme` | `compositor.toml`'s `[cursor] theme`, while it is installed |
 | `org.gnome.desktop.interface` | `cursor-size` | `compositor.toml`'s `[cursor] size`, with the theme |
+| `org.gnome.desktop.peripherals.mouse` | `double-click` | `compositor.toml`'s `[mouse] double_click_ms`, 400 by default |
 | `org.gnome.desktop.sound` | `theme-name` | `sounds.toml`'s `theme`, `wlrix` by default |
 | `org.gnome.desktop.sound` | `event-sounds` | `sounds.toml`'s `enabled` |
 

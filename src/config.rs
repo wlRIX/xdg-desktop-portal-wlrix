@@ -32,6 +32,9 @@ pub struct Config {
     /// `[cursor]`. See [`Cursor`].
     #[serde(skip)]
     pub cursor: Cursor,
+    /// And the double-click time, from the same file's `[mouse]`. See [`Mouse`].
+    #[serde(skip)]
+    pub mouse: Mouse,
 }
 
 /// What this backend reports through `org.freedesktop.impl.portal.Settings`.
@@ -166,11 +169,70 @@ pub struct Cursor {
 /// own default, kept in step by hand.
 pub const DEFAULT_CURSOR_SIZE: u32 = 24;
 
+/// The double-click time, for `org.gnome.desktop.peripherals.mouse` `double-click`.
+///
+/// From `compositor.toml`'s `[mouse]`, for the same reason as [`Cursor`]: the compositor uses it
+/// for its own window-menu button, and a GTK application double-clicking at a different speed
+/// beside it would be the desktop disagreeing with itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mouse {
+    pub double_click_ms: u32,
+}
+
+/// What `double_click_ms` means when `compositor.toml` does not say. The compositor's own default,
+/// kept in step by hand.
+pub const DEFAULT_DOUBLE_CLICK_MS: u32 = 400;
+
+impl Default for Mouse {
+    fn default() -> Self {
+        Self {
+            double_click_ms: DEFAULT_DOUBLE_CLICK_MS,
+        }
+    }
+}
+
+impl Mouse {
+    /// Zero would make a double click impossible, so it means the default, as it does to the
+    /// compositor.
+    fn resolve(section: MouseSection) -> Self {
+        Self {
+            double_click_ms: section
+                .double_click_ms
+                .filter(|&ms| ms > 0)
+                .unwrap_or(DEFAULT_DOUBLE_CLICK_MS),
+        }
+    }
+}
+
 /// The parts of `compositor.toml` this backend reads. No `deny_unknown_fields` -- see [`Cursor`].
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct CompositorFile {
     cursor: CursorSection,
+    mouse: MouseSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct MouseSection {
+    double_click_ms: Option<u32>,
+}
+
+/// Read `compositor.toml` -- the user's, else the system's -- leniently, or nothing.
+fn compositor_file() -> CompositorFile {
+    config_path("compositor.toml")
+        .and_then(|path| {
+            std::fs::read_to_string(&path)
+                .map_err(|err| err.to_string())
+                .and_then(|text| {
+                    toml::from_str::<CompositorFile>(&text).map_err(|err| err.to_string())
+                })
+                .inspect_err(|err| {
+                    tracing::warn!("could not read {}: {err}; using defaults", path.display())
+                })
+                .ok()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -181,23 +243,10 @@ struct CursorSection {
 }
 
 impl Cursor {
-    /// Read `compositor.toml` -- the user's, else the system's -- and the environment.
-    pub fn load() -> Self {
-        let file = config_path("compositor.toml")
-            .and_then(|path| {
-                std::fs::read_to_string(&path)
-                    .map_err(|err| err.to_string())
-                    .and_then(|text| {
-                        toml::from_str::<CompositorFile>(&text).map_err(|err| err.to_string())
-                    })
-                    .inspect_err(|err| {
-                        tracing::warn!("could not read {}: {err}; using defaults", path.display())
-                    })
-                    .ok()
-            })
-            .unwrap_or_default();
+    /// From `compositor.toml`'s `[cursor]`, and the environment.
+    fn from_file(file: CursorSection) -> Self {
         Self::resolve(
-            file.cursor,
+            file,
             std::env::var("XCURSOR_THEME").ok().as_deref(),
             std::env::var("XCURSOR_SIZE").ok().as_deref(),
         )
@@ -311,7 +360,9 @@ impl Config {
     pub fn load() -> Self {
         let mut config = Self::load_file();
         config.sounds = Sounds::load();
-        config.cursor = Cursor::load();
+        let compositor = compositor_file();
+        config.cursor = Cursor::from_file(compositor.cursor);
+        config.mouse = Mouse::resolve(compositor.mouse);
         config
     }
 
@@ -390,6 +441,18 @@ mod tests {
         let cursor = Cursor::resolve(file.cursor, None, None);
         assert_eq!(cursor.theme.as_deref(), Some("sgi"));
         assert_eq!(cursor.size, 32);
+    }
+
+    #[test]
+    fn the_double_click_time_comes_from_the_mouse_section() {
+        let file: CompositorFile =
+            toml::from_str("[mouse]\ndouble_click_ms = 250\nleft_handed = true\n").expect("parses");
+        assert_eq!(Mouse::resolve(file.mouse).double_click_ms, 250);
+
+        let zero: CompositorFile =
+            toml::from_str("[mouse]\ndouble_click_ms = 0\n").expect("parses");
+        assert_eq!(Mouse::resolve(zero.mouse), Mouse::default());
+        assert_eq!(Mouse::resolve(MouseSection::default()), Mouse::default());
     }
 
     #[test]
