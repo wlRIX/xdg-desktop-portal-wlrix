@@ -32,6 +32,10 @@
 //!   so a GTK application draws the same folders and file types as wlRIX Files. Only while that
 //!   theme is installed: GTK told to use a missing theme loses Adwaita's icons for hicolor's,
 //!   which is worse than not being told at all.
+//! - `org.gnome.desktop.interface` `cursor-theme` and `cursor-size` -- from `compositor.toml`'s
+//!   `[cursor]`, so a toolkit draws its own pointer from the theme the compositor draws the
+//!   desktop's in. Only while that theme is installed, as with `icon-theme`. See below for why the
+//!   session's `XCURSOR_THEME` does not already cover this.
 //! - `org.gnome.desktop.sound` `theme-name` and `event-sounds` -- from `sounds.toml`, so a GTK
 //!   application's own event sounds (libcanberra's) come from the theme the desktop's do, and
 //!   stop when the desktop's are switched off. Answered whether or not the theme is installed:
@@ -47,11 +51,18 @@
 //! gsettings' `Adwaita` while this backend did not serve it.
 //!
 //! Two things follow. A key answered here overrides `settings.ini` *and* gsettings, so only
-//! what wlRIX owns is answered -- `font-name` and the cursor settings are left alone, the cursor
-//! because it already reaches clients through the session's environment and the font because
-//! it is the user's. And a key *not* answered here does not reach `settings.ini` either: the
-//! GTK backend answers it from gsettings first, which is why `icon-theme` has to be served
-//! here rather than written to `settings.ini` and left to GTK.
+//! what wlRIX owns is answered -- `font-name` is left alone, because it is the user's. And a key
+//! *not* answered here does not reach `settings.ini` either: the GTK backend answers it from
+//! gsettings first, which is why `icon-theme` has to be served here rather than written to
+//! `settings.ini` and left to GTK.
+//!
+//! The cursor was once left alone too, on the grounds that the session already exports
+//! `XCURSOR_THEME` to every application it starts. That holds for libwayland-cursor and
+//! libXcursor, which read the variable, and not for a toolkit that asks the portal: the question
+//! fell through to gsettings, which answered `Adwaita` with `sgi` in the environment and in
+//! `settings.ini` both, and that application drew Adwaita's pointer under the IRIX one the
+//! compositor draws everywhere else. The cursor belongs to wlRIX as much as the icon theme does
+//! -- the compositor's `[cursor]` names it -- so it is answered here the same way.
 //!
 //! ## `SettingChanged`, and the reasoning that got it wrong once
 //!
@@ -203,14 +214,15 @@ fn current() -> Vec<(&'static str, &'static str, OwnedValue)> {
 
 /// Split from [`current`] so the table can be tested without a config file on disk.
 fn settings_for(config: &Config) -> Vec<(&'static str, &'static str, OwnedValue)> {
-    settings_with(config, icon_theme_installed)
+    settings_with(config, icon_theme_installed, cursor_theme_installed)
 }
 
-/// [`settings_for`], with what counts as an installed icon theme handed in -- so the table can be
-/// tested without depending on what this machine has under `share/icons`.
+/// [`settings_for`], with what counts as an installed icon theme and cursor theme handed in -- so
+/// the table can be tested without depending on what this machine has under `share/icons`.
 fn settings_with(
     config: &Config,
     installed: impl Fn(&str) -> bool,
+    cursor_installed: impl Fn(&str) -> bool,
 ) -> Vec<(&'static str, &'static str, OwnedValue)> {
     let (palette, unknown) = wlrix_ui::palette::resolve(config.appearance.palette.as_deref());
     if let Some(why) = unknown {
@@ -254,6 +266,28 @@ fn settings_with(
         }
         None => {}
     }
+
+    // Both or neither: a size with no theme would resize whatever gsettings names, which is not
+    // the pointer the compositor draws either.
+    match config.cursor.theme.as_deref() {
+        Some(theme) if cursor_installed(theme) => {
+            settings.push((
+                INTERFACE_PREFERENCES,
+                "cursor-theme",
+                variant(theme.to_owned()),
+            ));
+            // An `i` in GNOME's schema, so an `i` on the wire. Sizes are well inside its range;
+            // the compositor caps them far lower.
+            let size = i32::try_from(config.cursor.size).unwrap_or(i32::MAX);
+            settings.push((INTERFACE_PREFERENCES, "cursor-size", variant(size)));
+        }
+        Some(theme) => {
+            tracing::debug!(
+                "cursor theme {theme:?} is not installed; leaving the cursor unanswered"
+            );
+        }
+        None => {}
+    }
     settings
 }
 
@@ -271,6 +305,30 @@ fn icon_theme_installed(theme: &str) -> bool {
     home.into_iter()
         .chain(std::env::split_paths(&system))
         .any(|dir| dir.join("icons").join(theme).join("index.theme").is_file())
+}
+
+/// Whether a cursor theme named `theme` is installed where libXcursor and libwayland-cursor look:
+/// the XDG data directories, and `~/.icons`.
+///
+/// It has to have a `cursors` directory of its own. A theme that only inherits one -- the stock
+/// `default` is exactly that -- would work, but this backend would then be naming a theme for
+/// what some other theme draws, and an icon theme of the same name (`wlrix` is one) would pass a
+/// test for `index.theme` alone while drawing no pointer at all.
+fn cursor_theme_installed(theme: &str) -> bool {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| h.join(".local/share")));
+    let system = std::env::var_os("XDG_DATA_DIRS")
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    data_home
+        .into_iter()
+        .chain(std::env::split_paths(&system))
+        .map(|dir| dir.join("icons"))
+        .chain(home.map(|h| h.join(".icons")))
+        .any(|icons| icons.join(theme).join("cursors").is_dir())
 }
 
 /// One value, wrapped for the wire.
@@ -437,13 +495,11 @@ mod tests {
     #[test]
     fn nothing_else_is_answered_for() {
         // A key answered here overrides the user's own settings.ini and gsettings, so a key
-        // invented here is a key the user can no longer set. The font and the cursor are the
-        // ones that would hurt.
-        let all = settings_with(&config(None), |_| true);
+        // invented here is a key the user can no longer set. The font is the one that would
+        // hurt. (The cursor used to be on this list; see the module doc for why it is not.)
+        let all = settings_with(&with_cursor(Some("sgi"), 32), |_| true, |_| true);
         for (namespace, key) in [
             ("org.gnome.desktop.interface", "font-name"),
-            ("org.gnome.desktop.interface", "cursor-theme"),
-            ("org.gnome.desktop.interface", "cursor-size"),
             ("org.gnome.desktop.interface", "gtk-theme"),
         ] {
             assert!(
@@ -454,10 +510,62 @@ mod tests {
     }
 
     fn icon_theme(config: &Config, installed: bool) -> Option<String> {
-        settings_with(config, |_| installed)
+        settings_with(config, |_| installed, |_| true)
             .into_iter()
             .find(|(ns, k, _)| *ns == INTERFACE_PREFERENCES && *k == "icon-theme")
             .map(|(_, _, value)| String::try_from(value).unwrap())
+    }
+
+    fn with_cursor(theme: Option<&str>, size: u32) -> Config {
+        let mut config = config(None);
+        config.cursor = crate::config::Cursor {
+            theme: theme.map(ToOwned::to_owned),
+            size,
+        };
+        config
+    }
+
+    fn cursor(config: &Config, installed: bool) -> (Option<String>, Option<i32>) {
+        let settings = settings_with(config, |_| true, |_| installed);
+        let find = |key: &str| {
+            settings
+                .iter()
+                .find(|(ns, k, _)| *ns == INTERFACE_PREFERENCES && *k == key)
+                .map(|(_, _, value)| value.clone())
+        };
+        (
+            find("cursor-theme").map(|value| String::try_from(value).unwrap()),
+            find("cursor-size").map(|value| i32::try_from(value).unwrap()),
+        )
+    }
+
+    #[test]
+    fn the_cursor_is_the_compositors() {
+        // Unanswered, it falls through to xdg-desktop-portal-gtk and gsettings' Adwaita, and a
+        // GTK application draws a different pointer from the one over the rest of the desktop.
+        assert_eq!(
+            cursor(&with_cursor(Some("sgi"), 32), true),
+            (Some("sgi".to_owned()), Some(32))
+        );
+    }
+
+    #[test]
+    fn a_missing_or_unnamed_cursor_theme_is_not_reported() {
+        // Not the size either: on its own it would resize whatever theme gsettings names.
+        assert_eq!(cursor(&with_cursor(Some("sgi"), 32), false), (None, None));
+        assert_eq!(cursor(&with_cursor(None, 32), true), (None, None));
+    }
+
+    #[test]
+    fn a_cursor_change_is_announced() {
+        // `SettingChanged` is how a running application hears of it at all.
+        let before = settings_with(&with_cursor(Some("sgi"), 32), |_| true, |_| true);
+        let after = settings_with(&with_cursor(Some("sgi"), 48), |_| true, |_| true);
+        let keys: Vec<_> = changed(&before, &after)
+            .iter()
+            .map(|(ns, key, _)| (*ns, *key))
+            .collect();
+        assert_eq!(keys, [(INTERFACE_PREFERENCES, "cursor-size")]);
     }
 
     #[test]
@@ -574,7 +682,9 @@ mod tests {
 
     #[test]
     fn read_all_groups_by_namespace() {
-        let settings = settings_with(&config(Some("gotham")), |_| true);
+        let mut config = config(Some("gotham"));
+        config.cursor = with_cursor(Some("sgi"), 32).cursor;
+        let settings = settings_with(&config, |_| true, |_| true);
         let (mut appearance, mut wm, mut interface, mut sound) = (0, 0, 0, 0);
         for (namespace, _, _) in &settings {
             match *namespace {
@@ -587,7 +697,7 @@ mod tests {
         }
         assert_eq!(wm, 1);
         assert_eq!(appearance, 3, "color-scheme, accent-color and contrast");
-        assert_eq!(interface, 1, "icon-theme");
+        assert_eq!(interface, 3, "icon-theme, cursor-theme and cursor-size");
         assert_eq!(sound, 2, "theme-name and event-sounds");
     }
 }

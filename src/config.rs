@@ -28,6 +28,10 @@ pub struct Config {
     /// See [`Sounds`].
     #[serde(skip)]
     pub sounds: Sounds,
+    /// Not from `portal.toml` either: the pointer theme, read from `compositor.toml`'s
+    /// `[cursor]`. See [`Cursor`].
+    #[serde(skip)]
+    pub cursor: Cursor,
 }
 
 /// What this backend reports through `org.freedesktop.impl.portal.Settings`.
@@ -138,6 +142,92 @@ impl Sounds {
     }
 }
 
+/// The pointer theme and size, for `org.gnome.desktop.interface` `cursor-theme` and
+/// `cursor-size`.
+///
+/// Read from `compositor.toml`'s `[cursor]`, because the compositor is what decides it: it draws
+/// the pointer over the desktop and its own frames, and tells the session and XWayland which
+/// theme that is. A copy in `portal.toml` would be a second place to change one thing, as with
+/// [`Sounds`]. Parsed leniently for the same reason too -- the compositor validates its file, and
+/// every other section in it is not this backend's business.
+///
+/// The fallbacks are the compositor's, in its order: the file, then `XCURSOR_THEME` and
+/// `XCURSOR_SIZE`, then nothing for the theme and 24 for the size. "Nothing" rather than the
+/// compositor's `default`: that is the name of whatever this machine happens to inherit, and
+/// telling a toolkit so says nothing it does not already assume.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Cursor {
+    /// `None` when neither the file nor the environment names one.
+    pub theme: Option<String>,
+    pub size: u32,
+}
+
+/// What `size` means when neither `compositor.toml` nor `XCURSOR_SIZE` says. The compositor's
+/// own default, kept in step by hand.
+pub const DEFAULT_CURSOR_SIZE: u32 = 24;
+
+/// The parts of `compositor.toml` this backend reads. No `deny_unknown_fields` -- see [`Cursor`].
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CompositorFile {
+    cursor: CursorSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CursorSection {
+    theme: Option<String>,
+    size: Option<u32>,
+}
+
+impl Cursor {
+    /// Read `compositor.toml` -- the user's, else the system's -- and the environment.
+    pub fn load() -> Self {
+        let file = config_path("compositor.toml")
+            .and_then(|path| {
+                std::fs::read_to_string(&path)
+                    .map_err(|err| err.to_string())
+                    .and_then(|text| {
+                        toml::from_str::<CompositorFile>(&text).map_err(|err| err.to_string())
+                    })
+                    .inspect_err(|err| {
+                        tracing::warn!("could not read {}: {err}; using defaults", path.display())
+                    })
+                    .ok()
+            })
+            .unwrap_or_default();
+        Self::resolve(
+            file.cursor,
+            std::env::var("XCURSOR_THEME").ok().as_deref(),
+            std::env::var("XCURSOR_SIZE").ok().as_deref(),
+        )
+    }
+
+    /// The precedence, with the environment passed in so it can be tested without mutating the
+    /// process's own.
+    ///
+    /// Empty and zero count as absent, as they do to the compositor: a settings panel that clears
+    /// a field writes `""`, and that means what leaving the key out means.
+    fn resolve(file: CursorSection, env_theme: Option<&str>, env_size: Option<&str>) -> Self {
+        let named = |name: &String| !name.trim().is_empty();
+        let theme = file
+            .theme
+            .filter(named)
+            .or_else(|| env_theme.map(str::to_owned).filter(named))
+            .map(|theme| theme.trim().to_owned());
+        let size = file
+            .size
+            .filter(|&size| size > 0)
+            .or_else(|| {
+                env_size
+                    .and_then(|size| size.trim().parse().ok())
+                    .filter(|&s| s > 0)
+            })
+            .unwrap_or(DEFAULT_CURSOR_SIZE);
+        Self { theme, size }
+    }
+}
+
 /// How frames are got out of the compositor.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -221,6 +311,7 @@ impl Config {
     pub fn load() -> Self {
         let mut config = Self::load_file();
         config.sounds = Sounds::load();
+        config.cursor = Cursor::load();
         config
     }
 
@@ -281,5 +372,44 @@ mod tests {
     fn an_empty_sound_theme_is_the_default() {
         let file: SoundsFile = toml::from_str("theme = \"\"\n").expect("parses");
         assert_eq!(Sounds::from_file(file), Sounds::default());
+    }
+
+    fn section(theme: Option<&str>, size: Option<u32>) -> CursorSection {
+        CursorSection {
+            theme: theme.map(ToOwned::to_owned),
+            size,
+        }
+    }
+
+    #[test]
+    fn the_compositors_cursor_section_is_read_leniently() {
+        // Every other section of `compositor.toml` is the compositor's to validate.
+        let file: CompositorFile =
+            toml::from_str("[keyboard]\nlayout = \"us\"\n[cursor]\ntheme = \"sgi\"\nsize = 32\n")
+                .expect("parses");
+        let cursor = Cursor::resolve(file.cursor, None, None);
+        assert_eq!(cursor.theme.as_deref(), Some("sgi"));
+        assert_eq!(cursor.size, 32);
+    }
+
+    #[test]
+    fn the_cursor_file_comes_before_the_environment() {
+        let cursor = Cursor::resolve(section(Some("sgi"), Some(32)), Some("Adwaita"), Some("24"));
+        assert_eq!(cursor.theme.as_deref(), Some("sgi"));
+        assert_eq!(cursor.size, 32);
+    }
+
+    #[test]
+    fn an_absent_or_empty_cursor_falls_back_to_the_environment() {
+        let cursor = Cursor::resolve(section(Some(" "), Some(0)), Some("sgi"), Some("48"));
+        assert_eq!(cursor.theme.as_deref(), Some("sgi"));
+        assert_eq!(cursor.size, 48);
+    }
+
+    #[test]
+    fn with_nothing_named_there_is_no_cursor_theme() {
+        let cursor = Cursor::resolve(section(None, None), Some(""), Some("huge"));
+        assert_eq!(cursor.theme, None);
+        assert_eq!(cursor.size, DEFAULT_CURSOR_SIZE);
     }
 }

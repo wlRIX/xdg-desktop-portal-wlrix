@@ -301,6 +301,8 @@ anywhere else at all.
 | `org.freedesktop.appearance` | `accent-color` | the palette's accent, as `(ddd)` |
 | `org.freedesktop.appearance` | `contrast` | 0 — IRIX schemes are not contrast variants |
 | `org.gnome.desktop.interface` | `icon-theme` | `wlrix`, while it is installed |
+| `org.gnome.desktop.interface` | `cursor-theme` | `compositor.toml`'s `[cursor] theme`, while it is installed |
+| `org.gnome.desktop.interface` | `cursor-size` | `compositor.toml`'s `[cursor] size`, with the theme |
 | `org.gnome.desktop.sound` | `theme-name` | `sounds.toml`'s `theme`, `wlrix` by default |
 | `org.gnome.desktop.sound` | `event-sounds` | `sounds.toml`'s `enabled` |
 
@@ -327,11 +329,18 @@ here wins and any other key is asked of `xdg-desktop-portal-gtk`, which serves G
 xdg-desktop-portal 1.22: `button-layout` read back as this backend's value while gsettings said `appmenu:close`, and
 `icon-theme` read back as gsettings' `Adwaita` while this backend did not serve it.
 
-So a key answered here overrides both `settings.ini` and gsettings, and only what wlRIX owns is answered: the font and
-the cursor theme are left alone. **The icon theme is answered** because leaving it alone does not leave it to
+So a key answered here overrides both `settings.ini` and gsettings, and only what wlRIX owns is answered: the font is
+left alone. **The icon theme is answered** because leaving it alone does not leave it to
 `settings.ini` — gsettings answers first, and a GTK application drew Adwaita's folders next to wlRIX Files' IRIX ones.
 It is reported only while that theme is actually installed, since GTK told to use a missing theme loses Adwaita's icons
 for hicolor's.
+
+**The cursor is answered for the same reason.** The session exports `XCURSOR_THEME`, which libXcursor and
+libwayland-cursor read, but a toolkit that asks this interface never sees it: the question fell through to gsettings,
+which said `Adwaita` while the environment and `settings.ini` both said `sgi`. The values come from `compositor.toml`'s
+`[cursor]` — the compositor decides the theme, so it is read from there rather than copied into `portal.toml` — falling
+back to `XCURSOR_THEME`/`XCURSOR_SIZE` and then to a size of 24, as the compositor does. Neither key is reported unless
+the theme has a `cursors` directory on the XDG data directories or in `~/.icons`.
 
 The scheme comes from `[appearance] palette` in `portal.toml`, which `wlrix-settings-daemon` writes alongside the four
 components that draw. It is re-read on every call, so an application started after a change is told the new scheme with
