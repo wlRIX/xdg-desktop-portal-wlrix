@@ -9,6 +9,7 @@
 //! disappear from it, and -- more importantly -- a source that goes away mid-cast has to stop
 //! the stream rather than leave it frozen on a last frame forever.
 
+use crate::i18n::tr;
 use wayland_client::protocol::wl_output::WlOutput;
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1;
 
@@ -75,7 +76,7 @@ impl Window {
         } else if !self.app_id.is_empty() {
             &self.app_id
         } else {
-            "Untitled window"
+            tr("Untitled window", "無題のウィンドウ")
         }
     }
 }

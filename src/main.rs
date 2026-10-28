@@ -31,6 +31,7 @@ mod cast;
 mod config;
 mod dbus;
 mod filechooser;
+mod i18n;
 mod logging;
 mod picker;
 mod pidfile;
